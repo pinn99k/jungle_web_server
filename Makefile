@@ -1,6 +1,6 @@
 # make        → build/server
-# make asan   → build/asan/server (ASan + UBSan. 스텝 2부터는 테스트까지 실행)
-# make test   → 단위 테스트 (스텝 2부터)
+# make test   → tests/test_*.c를 각각 빌드 · 실행 (하나라도 실패하면 종료 코드 1)
+# make asan   → ASan + UBSan으로 서버와 테스트를 빌드하고 테스트까지 실행
 # make clean
 
 CFLAGS     := -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -pthread -I. -MMD -MP
@@ -9,35 +9,54 @@ OPT        := -O2
 ASAN_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
 
 BUILD      := build
-SERVER_SRC := server/main.c common/buf.c common/net.c
+COMMON_SRC := common/buf.c common/net.c common/http_parser.c
+SERVER_SRC := server/main.c $(COMMON_SRC)
+TEST_SRC   := $(wildcard tests/test_*.c)
 
 SERVER_OBJ := $(SERVER_SRC:%.c=$(BUILD)/obj/%.o)
-ASAN_OBJ   := $(SERVER_SRC:%.c=$(BUILD)/asan/obj/%.o)
+COMMON_OBJ := $(COMMON_SRC:%.c=$(BUILD)/obj/%.o)
+TESTS      := $(TEST_SRC:tests/%.c=$(BUILD)/tests/%)
+
+ASAN_OBJ        := $(SERVER_SRC:%.c=$(BUILD)/asan/obj/%.o)
+ASAN_COMMON_OBJ := $(COMMON_SRC:%.c=$(BUILD)/asan/obj/%.o)
+ASAN_TESTS      := $(TEST_SRC:tests/%.c=$(BUILD)/asan/tests/%)
 
 .PHONY: all asan test clean
+# 테스트 .o를 중간 파일로 보고 지우면 매번 다시 컴파일하므로 남겨 둔다
+.SECONDARY:
 
 all: $(BUILD)/server
 
 $(BUILD)/server: $(SERVER_OBJ)
 	$(CC) $(LDFLAGS) -o $@ $^
 
+$(BUILD)/tests/%: $(BUILD)/obj/tests/%.o $(COMMON_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(LDFLAGS) -o $@ $^
+
 $(BUILD)/obj/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(OPT) -c $< -o $@
 
-asan: $(BUILD)/asan/server
+test: $(TESTS)
+	@for t in $(TESTS); do echo "== $$t"; $$t || exit 1; done
+
+asan: $(BUILD)/asan/server $(ASAN_TESTS)
+	@for t in $(ASAN_TESTS); do echo "== $$t"; $$t || exit 1; done
 
 $(BUILD)/asan/server: $(ASAN_OBJ)
+	$(CC) $(LDFLAGS) -fsanitize=address,undefined -o $@ $^
+
+$(BUILD)/asan/tests/%: $(BUILD)/asan/obj/tests/%.o $(ASAN_COMMON_OBJ)
+	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) -fsanitize=address,undefined -o $@ $^
 
 $(BUILD)/asan/obj/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(ASAN_FLAGS) -c $< -o $@
 
-test:
-	@echo "단위 테스트는 스텝 2부터"
-
 clean:
 	rm -rf $(BUILD)
 
--include $(SERVER_OBJ:.o=.d) $(ASAN_OBJ:.o=.d)
+-include $(SERVER_OBJ:.o=.d) $(ASAN_OBJ:.o=.d) $(TEST_SRC:%.c=$(BUILD)/obj/%.d) \
+         $(TEST_SRC:%.c=$(BUILD)/asan/obj/%.d)

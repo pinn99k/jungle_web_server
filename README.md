@@ -17,9 +17,10 @@ docker compose down              # 끝낼 때
 
 ```
 make                    # build/server
-make asan               # build/asan/server (AddressSanitizer + UBSan)
-./build/server 8080     # 지금은 스텝 1: 어떤 요청이든 hello, 헤더 8KB 초과는 431
-curl -v localhost:8080/
+make test               # 단위 테스트 (tests/test_*.c)
+make asan               # ASan + UBSan으로 서버 · 테스트 빌드 후 테스트 실행
+./build/server 8080     # 지금은 스텝 2: 요청을 파싱해 "hello 메서드 경로" 응답, 규칙 위반은 상태 코드
+curl -s localhost:8080/a.html
 ```
 
 빌드 · 실행 명령은 스텝이 진행되면서 여기에 추가합니다.

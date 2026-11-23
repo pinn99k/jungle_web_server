@@ -258,6 +258,15 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 | 6 단단하게 | 8 | 안전 종료, 엣지 케이스 대응표 전부, 부하 측정 | 기본 구현 완료. 측정으로 한계가 숫자로 보임 | — |
 | 7 리뷰 · 리팩토링 | 10장 | 팀 코드 리뷰 후 고른 차별점 | — | 팀 대화 |
 
+페이즈가 끝날 때 실무 도구와 비교해 봅니다 (학습용, 2026-11-23 추가).
+
+| 페이즈 끝 | 비교 |
+|---|---|
+| 3 | nginx로 같은 `www/`를 띄워 응답 헤더 비교 |
+| 4 | 우리 스레드 수 ↔ Tomcat `maxThreads` ↔ nginx `worker_connections`가 각각 무엇을 제한하나 |
+| 5 | `conf/server.conf`와 같은 구성을 nginx 설정으로 쓰고, 줄마다 우리 함수와 짝짓기 |
+| 6 | wrk로 우리 서버와 nginx 처리량 비교, 차이의 원인 찾기 |
+
 ### 스텝 1. 버퍼, 소켓 헬퍼, 최소 서버
 
 목표: HTTP 파싱 없이 "소켓 준비 → accept → 헤더 끝까지 누적 → 고정 응답 → close" 전체 흐름을 돌립니다.
@@ -305,7 +314,12 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 | `void http_parser_init(struct http_parser *p, enum parse_mode mode)` | 요청 모드 또는 응답 모드로 파서를 초기화한다 | conn.c, proxy.c, backend |
 | `enum parse_result http_parse(struct http_parser *p, const char *buf, size_t len)` | 누적된 바이트를 지난번 위치부터 이어서 해석한다. `NEED_MORE` / `DONE` / `ERROR` 반환 | conn.c, proxy.c, backend |
 | `const char *http_header_get(const struct http_message *m, const char *name)` | 헤더 이름으로 값을 찾는다. 대소문자 무시. 없으면 NULL | static_handler, proxy, backend |
-| `static long find_crlf(const char *buf, size_t from, size_t len)` | `from`부터 `\r\n` 위치를 찾는다. 없으면 -1 | 내부 |
+| `static long find_crlf(const char *buf, size_t from, size_t len)` | `from`부터 `\r\n` 위치를 찾는다. 없으면 -1, `\r`이나 `\n`이 따로 나오면 -2 (Q2 지도 Q2) | 내부 |
+| `static enum parse_result fail(struct http_parser *p, int status)` | 오류 상태로 바꾸고 상태 코드를 기록한다 | 내부 (구현 중 추가) |
+| `static int parse_version(const char *s, size_t n, int *minor)` | `HTTP/x.y`를 검사한다. 성공 0, 형식 오류 400, 지원 안 하는 버전 505 | 내부 (구현 중 추가. 요청 줄 · 상태 줄 공용) |
+| `static int has_token(const char *list, const char *token)` | 쉼표 목록에 토큰이 있는지 본다 | 내부 (구현 중 추가) |
+| `static int end_of_headers(struct http_parser *p, size_t header_len)` | 빈 줄에서 Host 필수 · 본문 길이 · keep-alive를 정한다 | 내부 (구현 중 추가) |
+| `static enum parse_result pending_limit(struct http_parser *p, size_t len)` | 줄 끝이 아직 없을 때 상한(414 / 431)을 넘었는지 본다 | 내부 (구현 중 추가) |
 | `static int parse_request_line(struct http_message *m, const char *line, size_t n)` | 메서드, 요청 대상, 버전을 꺼낸다. 성공 0, 실패 시 상태 코드(400/414/501/505) | 내부 |
 | `static int parse_status_line(struct http_message *m, const char *line, size_t n)` | 응답 모드에서 버전과 상태 코드를 꺼낸다. 성공 0, 실패 400 | 내부 |
 | `static int parse_header_line(struct http_message *m, const char *line, size_t n)` | `이름: 값`을 나눠 헤더 배열에 넣는다. 성공 0, 실패 시 상태 코드(400/431) | 내부 |
@@ -514,7 +528,8 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 | 명세서 항목 | 상황 | 처리 | 담당 |
 |---|---|---|---|
 | 잘못된 HTTP 요청 | 요청 라인 형식 오류, Host 누락, 헤더 이름 뒤 공백 | 400 + 연결 닫기 | http_parser |
-| | 모르는 메서드 | 501 | http_parser |
+| | 메서드 이름 형식 오류 (대문자 토큰 아님) | 400. 16자 초과는 501 | http_parser |
+| | 형식은 맞지만 처리하지 않는 메서드 | 정적 경로는 405 (GET · HEAD만), 프록시 경로는 백엔드로 그대로 전달 | static_handler · proxy (Q2 지도 Q1, 2026-11-23) |
 | | 지원하지 않는 버전 | 505 | http_parser |
 | | 불완전한 헤더 후 무응답 | 10초 뒤 408 | conn |
 | 매우 큰 요청 | 본문 1MB 초과 | 413 | http_parser |

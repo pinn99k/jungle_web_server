@@ -1,4 +1,4 @@
-// 스텝 1 임시 서버: accept → 헤더 끝까지 읽기 → 고정 응답 → close. 스텝 2~5에서 교체한다
+// 임시 서버: accept → 요청 하나를 파싱 → 고정 응답 → close. 스텝 3~5에서 교체한다
 #include <errno.h>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -7,47 +7,49 @@
 #include <unistd.h>
 
 #include "common/buf.h"
+#include "common/http_parser.h"
 #include "common/net.h"
 
 #define DEFAULT_PORT 8080
 #define LISTEN_BACKLOG 128
-#define HEADER_MAX 8192
 #define READ_CHUNK 4096
 #define EMFILE_BACKOFF_NS 100000000L /* 100ms */
 
-static const char RESP_HELLO[] =
-    "HTTP/1.1 200 OK\r\n"
-    "Content-Type: text/plain\r\n"
-    "Content-Length: 6\r\n"
-    "Connection: close\r\n"
-    "\r\n"
-    "hello\n";
+/* 본문 길이는 %d, 본문은 %s. 사유구 표(http_reason)는 스텝 3에서 생긴다 */
+#define RESP_HELLO_FMT \
+    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s"
+#define RESP_ERROR_FMT \
+    "HTTP/1.1 %d Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 
-static const char RESP_431[] =
-    "HTTP/1.1 431 Request Header Fields Too Large\r\n"
-    "Content-Length: 0\r\n"
-    "Connection: close\r\n"
-    "\r\n";
-
-// 버퍼에서 \r\n\r\n을 찾아 헤더 길이(빈 줄 포함)를 반환한다. 없으면 -1
-// 이유: TCP는 메시지 경계가 없어서, 요청 헤더가 다 왔는지 빈 줄로 판단해야 한다. 스텝 2에서 파서로 교체
-static long find_header_end(const struct buf *b)
+// 파싱 결과에 맞는 응답을 보낸다. 성공이면 "hello 메서드 경로", 오류면 상태 코드만
+// 이유: 파서가 무엇을 알아냈는지 curl로 바로 보이게 한다. 스텝 3 http_response가 생기면 교체
+static void send_result(int fd, const struct http_parser *p, enum parse_result res)
 {
-    // 본문에 NUL이 있을 수 있어 strstr 대신 길이 기준으로 직접 찾는다
-    for (size_t i = 0; i + 3 < b->len; i++) {
-        if (b->data[i] == '\r' && b->data[i + 1] == '\n' &&
-            b->data[i + 2] == '\r' && b->data[i + 3] == '\n')
-            return (long)(i + 4);
+    char body[HTTP_LINE_MAX + 64];
+    char out[sizeof body + 128];
+    int n;
+    if (res == PARSE_DONE) {
+        int blen = snprintf(body, sizeof body, "hello %s %s\n", p->msg.method, p->msg.target);
+        n = snprintf(out, sizeof out, RESP_HELLO_FMT, blen, body);
+    } else {
+        n = snprintf(out, sizeof out, RESP_ERROR_FMT, p->error_status);
     }
-    return -1;
+    if (n < 0 || (size_t)n >= sizeof out) {
+        fprintf(stderr, "응답이 버퍼보다 큼\n");
+        return;
+    }
+    if (net_write_all(fd, out, (size_t)n) < 0)
+        perror("write");
 }
 
-// 헤더 끝까지 읽은 뒤 고정 응답 "hello"를 보낸다. 헤더가 8KB를 넘으면 431을 보낸다
-// 이유: 파싱 없이 "읽기 → 경계 찾기 → 응답" 흐름만 먼저 돌려 본다. 상한은 끝없이 쌓여 메모리가 터지는 것을 막는다
+// 요청 하나가 완성되거나 규칙 위반이 나올 때까지 읽고 파싱한 뒤 응답한다
+// 이유: read 조각을 버퍼에 쌓고, 파서가 "다 왔다(DONE)"고 할 때만 응답해야 요청 경계가 맞는다
 static void handle_client(int fd)
 {
     struct buf in;
     buf_init(&in);
+    struct http_parser p;
+    http_parser_init(&p, PARSE_REQUEST);
     char chunk[READ_CHUNK];
 
     for (;;) {
@@ -58,18 +60,11 @@ static void handle_client(int fd)
             fprintf(stderr, "buf_append: 메모리 부족\n");
             break;
         }
-        long end = find_header_end(&in);
-        int too_big = (end < 0) ? (in.len > HEADER_MAX) : (end > HEADER_MAX);
-        if (too_big) {
-            if (net_write_all(fd, RESP_431, sizeof RESP_431 - 1) < 0)
-                perror("write");
-            break;
-        }
-        if (end >= 0) {
-            if (net_write_all(fd, RESP_HELLO, sizeof RESP_HELLO - 1) < 0)
-                perror("write");
-            break;
-        }
+        enum parse_result res = http_parse(&p, in.data, in.len);
+        if (res == PARSE_NEED_MORE)
+            continue;
+        send_result(fd, &p, res);
+        break;
     }
     buf_free(&in);
 }
