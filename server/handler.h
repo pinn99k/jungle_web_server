@@ -4,6 +4,7 @@
 #include <stddef.h>
 
 #include "common/http_parser.h"
+#include "server/config.h"
 
 // 핸들러 하나가 요청 하나를 처리할 때 필요한 것. conn(스텝 5 전까지는 main)이 채운다
 struct request_ctx {
@@ -12,8 +13,10 @@ struct request_ctx {
     const struct http_message *msg;     /* 파싱한 요청 */
     const char *raw;                    /* 원본 요청 바이트 (본문 포함, 프록시가 쓴다) */
     size_t raw_len;                     /* = msg->total_len */
-    const char *root;                   /* 정적 파일 루트 (스텝 4부터 설정에서 채움) */
+    const char *root;                   /* 정적 파일 루트 (= cfg->root) */
     int keep_alive;                     /* 응답의 Connection 헤더 값 */
+    const struct route *route;          /* 라우터가 고른 라우트 */
+    const struct server_config *cfg;    /* 설정 (타임아웃 등, 읽기 전용) */
 };
 
 // 핸들러: 요청 하나를 처리해 응답을 보낸다. 0 = 계속 가능, -1 = 연결을 닫아야 함

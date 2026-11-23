@@ -396,17 +396,20 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 | `void config_defaults(struct server_config *c)` | 5장의 기본값으로 채운다 | server/main.c |
 | `int config_load_file(struct server_config *c, const char *path, char *err, size_t err_len)` | 설정 파일을 한 줄씩 읽어 값을 채운다. 실패하면 줄 번호와 이유를 `err`에 적고 -1 | server/main.c |
 | `int config_apply_args(struct server_config *c, int argc, char **argv, char *err, size_t err_len)` | `-p 포트`, `-r 루트`, `-c 설정파일`, `-t 스레드수`로 값을 덮어쓴다 | server/main.c |
-| `static int parse_route_line(struct server_config *c, char *line)` | `route <prefix> static` 또는 `route <prefix> proxy <host:port>...`를 해석한다 | 내부 |
-| `static int parse_backend(const char *s, struct backend *out)` | `host:port`를 나눈다 | 내부 |
+| `static const char *parse_route_line(struct server_config *c, char *line)` | `route <prefix> static` 또는 `route <prefix> proxy <host:port>...`를 해석한다. 성공 NULL, 실패 시 이유 문자열 | 내부 (구현 중 반환형 변경: 줄 번호와 함께 이유를 알리려고) |
+| `static int parse_backend(const char *s, struct backend *out)` | `host:port`를 나눈다. 숫자 IPv4만 (Q18) | 내부 |
+| `static int parse_int` · `static const char *apply_key` · `static const char *apply_line` | 범위 있는 정수 · 키 하나 적용(파일 · CLI 공용) · 한 줄 해석 | 내부 (구현 중 추가) |
 
 **server/router.h**
 
 | 함수 | 한 줄 설명 | 호출하는 곳 |
 |---|---|---|
-| `const struct route *router_match(const struct server_config *c, const char *target)` | 요청 경로와 가장 길게 일치하는 라우트를 반환한다. 없으면 NULL | conn.c, 테스트 |
+| `const struct route *router_match(const struct server_config *c, const char *target)` | 요청 경로(`?` 앞)와 가장 길게 일치하는 라우트를 반환한다. 일치는 경로 조각 단위: prefix로 시작하고 다음 글자가 없거나 `/` (prefix가 `/`로 끝나면 글자 단위와 같음, Q3 지도 Q13). 없으면 NULL | conn.c, 테스트 |
 | `handler_fn router_handler(const struct route *r)` | 라우트 종류에 맞는 핸들러 함수를 반환한다 (정적 → `static_handle`, 프록시 → `proxy_handle`) | conn.c |
 
-스텝 4 시점에는 `proxy_handle`이 아직 없으므로, 502를 돌려주는 임시 함수로 둡니다. 스텝 7에서 교체합니다.
+스텝 4 시점에는 `proxy_handle`이 아직 없으므로, 502를 돌려주는 임시 함수로 둡니다. 스텝 7에서 교체합니다. 임시 함수는 `server/proxy.c`에 최종 이름으로 둡니다 (router는 fd를 받지 않는 순수 모듈이라 안에 둘 수 없음).
+
+스텝 7에서 볼 것: `router_match`는 `const struct route *`를 돌려주는데, Round-Robin 카운터(`rr`)는 프록시가 올려야 합니다. 그때 카운터를 어디에 둘지(라우트 안 · 별도 배열) 정해야 합니다.
 
 **tests/test_router.c**: 가장 긴 prefix 우선, 일치하는 라우트 없음, `/api`와 `/api/`와 `/apix` 구분.
 
