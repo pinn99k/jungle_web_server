@@ -9,16 +9,18 @@ OPT        := -O2
 ASAN_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
 
 BUILD      := build
-COMMON_SRC := common/buf.c common/net.c common/http_parser.c
-SERVER_SRC := server/main.c $(COMMON_SRC)
+COMMON_SRC := common/buf.c common/net.c common/http_parser.c common/http_response.c
+# main을 뺀 server 모듈. 테스트도 이것과 함께 링크한다
+LIB_SRC    := $(COMMON_SRC) server/mime.c server/static_handler.c
+SERVER_SRC := server/main.c $(LIB_SRC)
 TEST_SRC   := $(wildcard tests/test_*.c)
 
 SERVER_OBJ := $(SERVER_SRC:%.c=$(BUILD)/obj/%.o)
-COMMON_OBJ := $(COMMON_SRC:%.c=$(BUILD)/obj/%.o)
+COMMON_OBJ := $(LIB_SRC:%.c=$(BUILD)/obj/%.o)
 TESTS      := $(TEST_SRC:tests/%.c=$(BUILD)/tests/%)
 
 ASAN_OBJ        := $(SERVER_SRC:%.c=$(BUILD)/asan/obj/%.o)
-ASAN_COMMON_OBJ := $(COMMON_SRC:%.c=$(BUILD)/asan/obj/%.o)
+ASAN_COMMON_OBJ := $(LIB_SRC:%.c=$(BUILD)/asan/obj/%.o)
 ASAN_TESTS      := $(TEST_SRC:tests/%.c=$(BUILD)/asan/tests/%)
 
 .PHONY: all asan test clean

@@ -364,18 +364,20 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 |---|---|---|
 | `const char *mime_from_path(const char *path)` | 확장자로 Content-Type을 정한다. 모르면 `application/octet-stream` | static_handler |
 
-**server/handler.h**: `struct request_ctx`와 `handler_fn` 정의 (6장 참고). 함수 없음.
+**server/handler.h**: `struct request_ctx`와 `handler_fn` 정의 (6장 참고). 함수 없음. 스텝 3의 `request_ctx` 필드: fd, ip, msg, raw, raw_len, root, keep_alive (라우트 · 설정 포인터는 스텝 4에서 추가, Q3 지도 Q9).
 
 **server/static_handler.h**
 
 | 함수 | 한 줄 설명 | 호출하는 곳 |
 |---|---|---|
 | `int static_handle(struct request_ctx *ctx)` | 핸들러 진입점. 메서드 확인 → 경로 변환 → 파일 열기 → 헤더 전송 → 본문 전송 | router가 고른 뒤 conn이 호출 |
-| `int static_resolve_path(const char *root, const char *target, char *out, size_t out_len)` | 요청 경로를 실제 파일 경로로 바꾼다. 성공 0, 실패 시 상태 코드(400/403/404) | static_handle, 테스트 |
+| `int static_resolve_path(const char *root, const char *target, char *out, size_t out_len)` | 요청 경로를 실제 파일 경로로 바꾼다. 문자열 정규화 뒤 `realpath`로 링크를 풀고, 결과가 루트와 같거나 `루트/`로 시작하는지 확인한다 (Q3 지도 Q1). 성공 0, 실패 시 상태 코드(400/403/404) | static_handle, 테스트 |
 | `static int percent_decode(const char *in, size_t n, char *out, size_t out_len)` | `%2e` 같은 인코딩을 푼다. `%00`이나 잘못된 인코딩이면 -1 | 내부 |
 | `static int normalize_path(char *path)` | `.`과 `..`을 정리한다. 루트 위로 올라가려 하면 -1 | 내부 |
-| `static int open_file(const char *path, int *fd, off_t *size)` | 파일을 열고 크기를 얻는다. 디렉토리면 `index.html`을 붙인다. 성공 0, 실패 시 상태 코드(403/404/500) | 내부 |
+| `static int open_file(char *path, size_t cap, int slash, int *fd, off_t *size)` | 파일을 열고 크기를 얻는다. 디렉토리면 `index.html`을 붙인다 (끝에 `/`가 없으면 301, Q3 지도 Q2). 마지막 조각은 `O_NOFOLLOW`로 연다. 성공 0, 실패 시 상태 코드(301/403/404/500) | 내부 (구현 중 시그니처 변경) |
 | `static int send_file_body(int sock, int file_fd, off_t size)` | 파일을 64KB씩 읽어 소켓으로 보낸다. 성공 0, 실패 -1 | 내부 |
+| `static int hex_value(char c)` · `static int send_built(int fd, struct buf *out, int build_rc)` | 16진수 한 글자 값 · 만든 응답 보내고 해제 | 내부 (구현 중 추가) |
+| `static int appendf(struct buf *out, const char *fmt, ...)` (http_response.c) | 형식 문자열 한 줄을 잘림 검사와 함께 붙인다 | 내부 (구현 중 추가) |
 
 정적 파일에는 GET과 HEAD만 허용합니다(그 외 405). HEAD면 헤더까지만 보냅니다.
 

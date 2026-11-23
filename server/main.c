@@ -1,4 +1,4 @@
-// 임시 서버: accept → 요청 하나를 파싱 → 고정 응답 → close. 스텝 3~5에서 교체한다
+// 임시 서버: accept → 요청 하나를 파싱 → 정적 파일 응답 → close. 스텝 4~5에서 교체한다
 #include <errno.h>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -8,43 +8,37 @@
 
 #include "common/buf.h"
 #include "common/http_parser.h"
+#include "common/http_response.h"
 #include "common/net.h"
+#include "server/handler.h"
+#include "server/static_handler.h"
 
 #define DEFAULT_PORT 8080
 #define LISTEN_BACKLOG 128
 #define READ_CHUNK 4096
 #define EMFILE_BACKOFF_NS 100000000L /* 100ms */
+#define STATIC_ROOT "./www"          /* 스텝 4에서 설정 파일 · -r 인자로 바뀐다 */
 
-/* 본문 길이는 %d, 본문은 %s. 사유구 표(http_reason)는 스텝 3에서 생긴다 */
-#define RESP_HELLO_FMT \
-    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s"
-#define RESP_ERROR_FMT \
-    "HTTP/1.1 %d Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-
-// 파싱 결과에 맞는 응답을 보낸다. 성공이면 "hello 메서드 경로", 오류면 상태 코드만
-// 이유: 파서가 무엇을 알아냈는지 curl로 바로 보이게 한다. 스텝 3 http_response가 생기면 교체
-static void send_result(int fd, const struct http_parser *p, enum parse_result res)
+// 파싱 결과에 따라 정적 핸들러를 부르거나 오류 응답을 보낸다
+// 이유: 라우터(스텝 4)가 생기기 전이라 모든 요청을 정적 핸들러로 보낸다
+static void dispatch(int fd, const char *ip, const struct http_parser *p, const struct buf *in,
+                     enum parse_result res)
 {
-    char body[HTTP_LINE_MAX + 64];
-    char out[sizeof body + 128];
-    int n;
     if (res == PARSE_DONE) {
-        int blen = snprintf(body, sizeof body, "hello %s %s\n", p->msg.method, p->msg.target);
-        n = snprintf(out, sizeof out, RESP_HELLO_FMT, blen, body);
-    } else {
-        n = snprintf(out, sizeof out, RESP_ERROR_FMT, p->error_status);
-    }
-    if (n < 0 || (size_t)n >= sizeof out) {
-        fprintf(stderr, "응답이 버퍼보다 큼\n");
+        struct request_ctx ctx = {fd, ip, &p->msg, in->data, p->msg.total_len, STATIC_ROOT, 0};
+        static_handle(&ctx);
         return;
     }
-    if (net_write_all(fd, out, (size_t)n) < 0)
-        perror("write");
+    struct buf out;
+    buf_init(&out);
+    if (http_build_error(&out, p->error_status, 0) < 0 || net_write_all(fd, out.data, out.len) < 0)
+        perror("error response");
+    buf_free(&out);
 }
 
 // 요청 하나가 완성되거나 규칙 위반이 나올 때까지 읽고 파싱한 뒤 응답한다
 // 이유: read 조각을 버퍼에 쌓고, 파서가 "다 왔다(DONE)"고 할 때만 응답해야 요청 경계가 맞는다
-static void handle_client(int fd)
+static void handle_client(int fd, const char *ip)
 {
     struct buf in;
     buf_init(&in);
@@ -63,7 +57,7 @@ static void handle_client(int fd)
         enum parse_result res = http_parse(&p, in.data, in.len);
         if (res == PARSE_NEED_MORE)
             continue;
-        send_result(fd, &p, res);
+        dispatch(fd, ip, &p, &in, res);
         break;
     }
     buf_free(&in);
@@ -109,7 +103,7 @@ int main(int argc, char **argv)
             continue;
         }
         fprintf(stderr, "연결: %s\n", ip);
-        handle_client(cfd);
+        handle_client(cfd, ip);
         close(cfd);
     }
 }
