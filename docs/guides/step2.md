@@ -36,6 +36,8 @@
 | `fail` (static) | 오류 상태로 바꾸고 상태 코드 기록 | 여러 곳 |
 | `send_result` (main.c, static) | DONE이면 `hello 메서드 경로`, ERROR면 상태 코드 응답 | `handle_client` |
 
+페이즈 2 점검 뒤 단순화 (2026-11-23): 글자 판별 함수 `is_ows` · `is_method_token` · `is_visible` · `is_field_value`와 `trim_ows`를 추가했습니다. `parse_request_line` · `parse_header_line` · `has_token`이 조건 대신 이 이름들을 부릅니다. 동작은 같습니다 (테스트 8개 그대로 통과).
+
 ## 3. 요청 하나 기준 호출 순서
 
 `POST /api/echo` + 본문 5바이트가 두 조각으로 온 경우:

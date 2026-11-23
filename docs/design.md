@@ -320,6 +320,7 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 | `static int has_token(const char *list, const char *token)` | 쉼표 목록에 토큰이 있는지 본다 | 내부 (구현 중 추가) |
 | `static int end_of_headers(struct http_parser *p, size_t header_len)` | 빈 줄에서 Host 필수 · 본문 길이 · keep-alive를 정한다 | 내부 (구현 중 추가) |
 | `static enum parse_result pending_limit(struct http_parser *p, size_t len)` | 줄 끝이 아직 없을 때 상한(414 / 431)을 넘었는지 본다 | 내부 (구현 중 추가) |
+| `is_ows` · `is_method_token` · `is_visible` · `is_field_value` · `trim_ows` (static) | 글자 판별과 앞뒤 공백 다듬기 | 내부 (페이즈 2 점검 단순화) |
 | `static int parse_request_line(struct http_message *m, const char *line, size_t n)` | 메서드, 요청 대상, 버전을 꺼낸다. 성공 0, 실패 시 상태 코드(400/414/501/505) | 내부 |
 | `static int parse_status_line(struct http_message *m, const char *line, size_t n)` | 응답 모드에서 버전과 상태 코드를 꺼낸다. 성공 0, 실패 400 | 내부 |
 | `static int parse_header_line(struct http_message *m, const char *line, size_t n)` | `이름: 값`을 나눠 헤더 배열에 넣는다. 성공 0, 실패 시 상태 코드(400/431) | 내부 |

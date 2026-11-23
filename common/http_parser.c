@@ -54,6 +54,58 @@ static int parse_version(const char *s, size_t n, int *minor)
     return 0;
 }
 
+// c가 공백이나 탭이면 1
+// 이유: HTTP는 헤더 값 앞뒤와 목록 사이에 공백 · 탭(OWS)을 허용하므로 둘을 같은 것으로 본다
+static int is_ows(char c)
+{
+    return c == ' ' || c == '\t';
+}
+
+// s[0..n)이 모두 대문자면 1
+// 이유: 메서드는 이름을 몰라도 형식(대문자 토큰)만 맞으면 통과시킨다 (Q1)
+static int is_method_token(const char *s, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] < 'A' || s[i] > 'Z')
+            return 0;
+    }
+    return 1;
+}
+
+// s[0..n)에 공백 · 제어 문자가 하나도 없으면 1
+// 이유: 요청 대상과 헤더 이름에 공백이나 \0 · \r이 섞이면 서버마다 경계를 다르게 볼 수 있다
+static int is_visible(const char *s, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c <= 0x20 || c == 0x7f)
+            return 0;
+    }
+    return 1;
+}
+
+// s[0..n)이 헤더 값으로 쓸 수 있으면(탭 말고는 제어 문자 없음) 1
+// 이유: 값 안의 공백은 허용하되, \0 · \r 같은 제어 문자로 헤더를 숨기는 공격은 막는다
+static int is_field_value(const char *s, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if ((c < 0x20 && c != '\t') || c == 0x7f)
+            return 0;
+    }
+    return 1;
+}
+
+// [*s, *e) 범위의 앞뒤 공백 · 탭을 걷어 낸다
+// 이유: 헤더 값과 Connection 목록 항목을 같은 규칙으로 다듬기 위해서다
+static void trim_ows(const char **s, const char **e)
+{
+    while (*s < *e && is_ows(**s))
+        (*s)++;
+    while (*e > *s && is_ows((*e)[-1]))
+        (*e)--;
+}
+
 // 메서드, 요청 대상, 버전을 꺼낸다. 성공 0, 실패 시 상태 코드(400/414/501/505)
 // 이유: 메서드는 형식만 보고 처리 여부는 핸들러가 정한다 (Q1). 대상은 /로 시작하는 경로만 받는다 (Q4)
 static int parse_request_line(struct http_message *m, const char *line, size_t n)
@@ -62,10 +114,8 @@ static int parse_request_line(struct http_message *m, const char *line, size_t n
     if (sp1 == NULL || sp1 == line)
         return 400;
     size_t mlen = (size_t)(sp1 - line);
-    for (size_t i = 0; i < mlen; i++) {
-        if (line[i] < 'A' || line[i] > 'Z')
-            return 400;
-    }
+    if (!is_method_token(line, mlen))
+        return 400;
     if (mlen > HTTP_METHOD_MAX)
         return 501;
 
@@ -77,10 +127,8 @@ static int parse_request_line(struct http_message *m, const char *line, size_t n
     size_t tlen = (size_t)(sp2 - t);
     if (tlen >= sizeof m->target)
         return 414;
-    for (size_t i = 0; i < tlen; i++) {
-        if ((unsigned char)t[i] <= 0x20 || t[i] == 0x7f)
-            return 400;
-    }
+    if (!is_visible(t, tlen))
+        return 400;
     int rc = parse_version(sp2 + 1, rest - tlen - 1, &m->minor_version);
     if (rc != 0)
         return rc;
@@ -115,29 +163,21 @@ static int parse_status_line(struct http_message *m, const char *line, size_t n)
 static int parse_header_line(struct http_message *m, const char *line, size_t n)
 {
     // 줄 앞 공백 = 앞 헤더에 이어 쓰는 옛 형식. RFC 7230 권고대로 거부한다 (Q5)
-    if (line[0] == ' ' || line[0] == '\t')
+    if (is_ows(line[0]))
         return 400;
     const char *colon = memchr(line, ':', n);
     if (colon == NULL || colon == line)
         return 400;
     size_t nlen = (size_t)(colon - line);
-    for (size_t i = 0; i < nlen; i++) {
-        if ((unsigned char)line[i] <= 0x20 || line[i] == 0x7f)
-            return 400;
-    }
+    if (!is_visible(line, nlen))
+        return 400;
 
     const char *v = colon + 1;
     const char *end = line + n;
-    while (v < end && (*v == ' ' || *v == '\t'))
-        v++;
-    while (end > v && (end[-1] == ' ' || end[-1] == '\t'))
-        end--;
+    trim_ows(&v, &end);
     size_t vlen = (size_t)(end - v);
-    for (size_t i = 0; i < vlen; i++) {
-        unsigned char c = (unsigned char)v[i];
-        if ((c < 0x20 && c != '\t') || c == 0x7f)
-            return 400;
-    }
+    if (!is_field_value(v, vlen))
+        return 400;
     if (nlen >= HTTP_NAME_MAX || vlen >= HTTP_VALUE_MAX || m->header_count >= HTTP_MAX_HEADERS)
         return 431;
 
@@ -208,17 +248,15 @@ static int has_token(const char *list, const char *token)
     size_t tlen = strlen(token);
     const char *s = list;
     while (*s != '\0') {
-        while (*s == ' ' || *s == '\t' || *s == ',')
-            s++;
         const char *e = s;
         while (*e != '\0' && *e != ',')
             e++;
-        const char *t = e;
-        while (t > s && (t[-1] == ' ' || t[-1] == '\t'))
-            t--;
-        if ((size_t)(t - s) == tlen && strncasecmp(s, token, tlen) == 0)
+        const char *a = s;
+        const char *b = e;
+        trim_ows(&a, &b);
+        if ((size_t)(b - a) == tlen && strncasecmp(a, token, tlen) == 0)
             return 1;
-        s = e;
+        s = (*e == ',') ? e + 1 : e;
     }
     return 0;
 }
