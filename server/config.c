@@ -38,6 +38,19 @@ static int parse_backend(const char *s, struct backend *out)
     return 0;
 }
 
+// strtok_r로 이어서 남은 토큰을 모두 백엔드 주소로 읽어 r에 넣는다. 성공 NULL, 실패 시 이유
+// 이유: proxy 라우트의 "백엔드 목록 검사"를 라우트 줄 해석과 나눠, 각각 한 가지 일만 하게 한다
+static const char *parse_backends(struct route *r, char **save)
+{
+    for (char *b = strtok_r(NULL, " \t", save); b != NULL; b = strtok_r(NULL, " \t", save)) {
+        if (r->backend_count >= CONFIG_MAX_BACKENDS)
+            return "백엔드가 너무 많음 (최대 8)";
+        if (parse_backend(b, &r->backends[r->backend_count++]) < 0)
+            return "백엔드 주소는 숫자 IPv4:포트";
+    }
+    return r->backend_count == 0 ? "proxy 뒤에 백엔드가 하나 이상 필요" : NULL;
+}
+
 // "<prefix> static" 또는 "<prefix> proxy <IPv4:포트>..."를 라우트로 추가한다. 성공 NULL, 실패 시 이유
 // 이유: 라우팅 규칙을 설정으로 받으라는 명세 요구. 잘못된 규칙은 서버를 켜기 전에 거부한다
 static const char *parse_route_line(struct server_config *c, char *line)
@@ -63,14 +76,9 @@ static const char *parse_route_line(struct server_config *c, char *line)
             return "static 뒤에는 아무것도 오지 않음";
     } else if (strcmp(type, "proxy") == 0) {
         r->type = ROUTE_PROXY;
-        for (char *b = strtok_r(NULL, " \t", &save); b != NULL; b = strtok_r(NULL, " \t", &save)) {
-            if (r->backend_count >= CONFIG_MAX_BACKENDS)
-                return "백엔드가 너무 많음 (최대 8)";
-            if (parse_backend(b, &r->backends[r->backend_count++]) < 0)
-                return "백엔드 주소는 숫자 IPv4:포트";
-        }
-        if (r->backend_count == 0)
-            return "proxy 뒤에 백엔드가 하나 이상 필요";
+        const char *msg = parse_backends(r, &save);
+        if (msg != NULL)
+            return msg;
     } else {
         return "라우트 종류는 static 또는 proxy";
     }
@@ -178,6 +186,27 @@ int config_load_file(struct server_config *c, const char *path, char *err, size_
     return 0;
 }
 
+static const struct {
+    const char *flag;
+    const char *key;                    /* NULL = 설정 키가 아님 (-c는 따로 처리) */
+} FLAGS[] = {
+    {"-p", "port"},
+    {"-r", "root"},
+    {"-t", "threads"},
+    {"-c", NULL},
+};
+
+// 인자 이름으로 FLAGS 표의 칸 번호를 찾는다. 모르는 인자면 -1
+// 이유: 인자와 설정 키의 짝을 표 하나에 두어, 인자를 추가할 때 표만 고치면 되게 한다
+static int find_flag(const char *a)
+{
+    for (size_t i = 0; i < sizeof FLAGS / sizeof FLAGS[0]; i++) {
+        if (strcmp(a, FLAGS[i].flag) == 0)
+            return (int)i;
+    }
+    return -1;
+}
+
 // -c 파일을 먼저 읽고 -p · -r · -t로 덮어쓴다. 성공 0, 실패하면 이유를 err에 적고 -1
 // 이유: 인자 순서와 상관없이 CLI가 파일을 이기게 한다 (Q14: -p 9090 -c f도 9090)
 int config_apply_args(struct server_config *c, int argc, char **argv, char *err, size_t err_len)
@@ -188,13 +217,12 @@ int config_apply_args(struct server_config *c, int argc, char **argv, char *err,
     }
     for (int i = 1; i < argc; i += 2) {
         const char *a = argv[i];
-        const char *key = strcmp(a, "-p") == 0 ? "port"
-                        : strcmp(a, "-r") == 0 ? "root"
-                        : strcmp(a, "-t") == 0 ? "threads" : NULL;
-        if (key == NULL && strcmp(a, "-c") != 0) {
+        int f = find_flag(a);
+        if (f < 0) {
             snprintf(err, err_len, "모르는 인자: %s", a);
             return -1;
         }
+        const char *key = FLAGS[f].key;
         if (i + 1 >= argc) {
             snprintf(err, err_len, "%s 뒤에 값이 필요", a);
             return -1;

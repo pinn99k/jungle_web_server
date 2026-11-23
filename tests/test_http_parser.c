@@ -140,7 +140,8 @@ static void test_keep_alive(void)
     CHECK_INT(P.msg.keep_alive, 1);
     parse_str(PARSE_REQUEST, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
     CHECK_INT(P.msg.keep_alive, 0);
-    parse_str(PARSE_REQUEST, "GET / HTTP/1.1\r\nHost: x\r\nConnection: Upgrade, Keep-Alive\r\n\r\n");
+    parse_str(PARSE_REQUEST,
+              "GET / HTTP/1.1\r\nHost: x\r\nConnection: Upgrade, Keep-Alive\r\n\r\n");
     CHECK_INT(P.msg.keep_alive, 1);
 }
 

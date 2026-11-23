@@ -201,7 +201,8 @@ int static_handle(struct request_ctx *ctx)
     if (rc == 301) {
         char loc[HTTP_LINE_MAX + 32];
         // Location = 경로 + "/" + 원래 쿼리 (target은 파서가 제어 문자를 걸렀으므로 헤더에 그대로 넣어도 안전)
-        int n = snprintf(loc, sizeof loc, "Location: %.*s/%s\r\n", (int)plen, target, target + plen);
+        int n = snprintf(loc, sizeof loc, "Location: %.*s/%s\r\n", (int)plen, target,
+                         target + plen);
         int built = -1;
         if (n > 0 && (size_t)n < sizeof loc)
             built = http_build_header(&out, 301, NULL, 0, ctx->keep_alive, loc);
@@ -210,7 +211,8 @@ int static_handle(struct request_ctx *ctx)
     if (rc != 0)
         return send_built(ctx->fd, &out, http_build_error(&out, rc, ctx->keep_alive));
 
-    int ok = http_build_header(&out, 200, mime_from_path(path), (long)size, ctx->keep_alive, NULL) == 0
+    const char *type = mime_from_path(path);
+    int ok = http_build_header(&out, 200, type, (long)size, ctx->keep_alive, NULL) == 0
              && net_write_all(ctx->fd, out.data, out.len) == 0
              && (head || send_file_body(ctx->fd, fd, size) == 0);
     buf_free(&out);

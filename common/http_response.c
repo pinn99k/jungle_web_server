@@ -5,30 +5,38 @@
 #include <string.h>
 #include <time.h>
 
+static const struct {
+    int code;
+    const char *reason;
+} REASONS[] = {
+    {200, "OK"},
+    {301, "Moved Permanently"},
+    {400, "Bad Request"},
+    {403, "Forbidden"},
+    {404, "Not Found"},
+    {405, "Method Not Allowed"},
+    {408, "Request Timeout"},
+    {411, "Length Required"},
+    {413, "Content Too Large"},
+    {414, "URI Too Long"},
+    {431, "Request Header Fields Too Large"},
+    {500, "Internal Server Error"},
+    {501, "Not Implemented"},
+    {502, "Bad Gateway"},
+    {503, "Service Unavailable"},
+    {504, "Gateway Timeout"},
+    {505, "HTTP Version Not Supported"},
+};
+
 // 상태 코드에 맞는 사유구를 반환한다 (200 → "OK"). 모르는 코드면 "Unknown"
 // 이유: 상태 줄 "HTTP/1.1 404 Not Found"의 뒷부분을 서버 · 백엔드가 같은 표로 쓰게 한다
 const char *http_reason(int status)
 {
-    switch (status) {
-    case 200: return "OK";
-    case 301: return "Moved Permanently";
-    case 400: return "Bad Request";
-    case 403: return "Forbidden";
-    case 404: return "Not Found";
-    case 405: return "Method Not Allowed";
-    case 408: return "Request Timeout";
-    case 411: return "Length Required";
-    case 413: return "Content Too Large";
-    case 414: return "URI Too Long";
-    case 431: return "Request Header Fields Too Large";
-    case 500: return "Internal Server Error";
-    case 501: return "Not Implemented";
-    case 502: return "Bad Gateway";
-    case 503: return "Service Unavailable";
-    case 504: return "Gateway Timeout";
-    case 505: return "HTTP Version Not Supported";
-    default: return "Unknown";
+    for (size_t i = 0; i < sizeof REASONS / sizeof REASONS[0]; i++) {
+        if (REASONS[i].code == status)
+            return REASONS[i].reason;
     }
+    return "Unknown";
 }
 
 // printf 형식으로 만든 한 줄을 out 뒤에 붙인다. 성공 0, 실패(1KB 초과 · 메모리 부족) -1
@@ -54,7 +62,8 @@ int http_build_header(struct buf *out, int status, const char *content_type, lon
     time_t now = time(NULL);
     struct tm tm;
     // HTTP 날짜는 항상 GMT (RFC 7231 형식: Sun, 06 Nov 1994 08:49:37 GMT)
-    if (gmtime_r(&now, &tm) == NULL || strftime(date, sizeof date, "%a, %d %b %Y %H:%M:%S GMT", &tm) == 0)
+    if (gmtime_r(&now, &tm) == NULL
+        || strftime(date, sizeof date, "%a, %d %b %Y %H:%M:%S GMT", &tm) == 0)
         return -1;
 
     if (appendf(out, "HTTP/1.1 %d %s\r\nDate: %s\r\nServer: mini_web_server\r\n", status,

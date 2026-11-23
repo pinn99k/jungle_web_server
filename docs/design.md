@@ -399,6 +399,7 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 | `static const char *parse_route_line(struct server_config *c, char *line)` | `route <prefix> static` 또는 `route <prefix> proxy <host:port>...`를 해석한다. 성공 NULL, 실패 시 이유 문자열 | 내부 (구현 중 반환형 변경: 줄 번호와 함께 이유를 알리려고) |
 | `static int parse_backend(const char *s, struct backend *out)` | `host:port`를 나눈다. 숫자 IPv4만 (Q18) | 내부 |
 | `static int parse_int` · `static const char *apply_key` · `static const char *apply_line` | 범위 있는 정수 · 키 하나 적용(파일 · CLI 공용) · 한 줄 해석 | 내부 (구현 중 추가) |
+| `static const char *parse_backends` · `static int find_flag` | proxy 백엔드 목록 읽기 · 인자 표(FLAGS)에서 칸 찾기 | 내부 (페이즈 3 점검 단순화) |
 
 **server/router.h**
 
