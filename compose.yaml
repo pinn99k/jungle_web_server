@@ -1,0 +1,15 @@
+# docker compose up -d --build   → 컨테이너를 띄워 둔다
+# docker compose exec dev bash   → 터미널마다 하나씩 (서버 / curl / 백엔드)
+# docker compose down            → 정리
+services:
+  dev:
+    build: .
+    image: mini-web-server-dev
+    # 컨테이너를 켜 두기만 한다. 서버는 exec 셸에서 띄워서 PID 1이 아니게 한다 (Ctrl+C가 먹도록)
+    command: sleep infinity
+    init: true
+    working_dir: /work
+    volumes:
+      - .:/work
+    ports:
+      - "8080:8080"

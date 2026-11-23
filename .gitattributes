@@ -1,0 +1,2 @@
+# 컨테이너(Linux)에서 셸 스크립트가 CRLF로 깨지지 않게 저장소는 LF로 통일
+* text=auto eol=lf
