@@ -17,6 +17,9 @@ ssize_t net_read(int fd, void *buf, size_t n);
 // n바이트를 모두 보낼 때까지 write()를 반복한다. 성공 0, 실패 -1
 int net_write_all(int fd, const void *data, size_t n);
 
+// 숫자 IPv4 host:port에 timeout_ms 안에 연결해 fd(블로킹)를 반환한다. 실패 -1 (시간 초과면 errno = ETIMEDOUT)
+int net_connect(const char *host, uint16_t port, int timeout_ms);
+
 // 소켓의 읽기 · 쓰기 타임아웃을 밀리초로 건다. 넘으면 read · write가 EAGAIN으로 실패한다. 성공 0, 실패 -1
 int net_set_timeout(int fd, int recv_ms, int send_ms);
 

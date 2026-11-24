@@ -506,7 +506,11 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 | `static int connect_backend(struct route *r, const struct server_config *cfg)` | 고른 백엔드에 연결하고, 실패하면 다음 백엔드로 한 번 재시도한다. 실패 -1 | 내부 |
 | `static int build_upstream_request(const struct request_ctx *ctx, struct buf *out)` | 요청 라인 + 헤더(hop-by-hop 제거, `X-Forwarded-For` 추가, `Connection: close`) + 본문을 만든다 | 내부 |
 | `static int relay_response(int backend_fd, struct request_ctx *ctx)` | 백엔드 응답을 읽어 클라이언트에 그대로 쓴다. 응답 헤더를 파싱해 keep-alive 여부를 정한다. 아무것도 받기 전에 시간이 초과되면 504 | 내부 |
-| `static int is_hop_by_hop(const char *name)` | 전달하면 안 되는 헤더인지 판단한다 | 내부 |
+| `static int is_hop_by_hop(const char *name)` | 전달하면 안 되는 헤더인지 판단한다 (우리가 다시 쓰는 X-Forwarded-For 포함) | 내부 |
+| `static int read_response_head` · `static int build_client_header` · `static int send_error` · `static int add_line` | 백엔드 응답 헤더까지 읽기(첫 바이트 전 시간 초과 504) · 손님 쪽 헤더 다시 쓰기 · 502/504 응답 · 잘림 검사 붙은 한 줄 추가 | 내부 (구현 중 추가) |
+| `static int connect_with_timeout` (net.c) | 논블로킹 connect + poll로 1초 제한 | 내부 (구현 중 추가) |
+
+구현에서 정한 것 (Q5 지도): 경로 · Host 그대로 (Q1 · Q2), Round-Robin 카운터는 `proxy.c`의 `static atomic_uint rr_counters[]`, 칸 번호는 `route - cfg->routes` (Q4). 응답은 헤더까지 받은 뒤 손님 쪽 헤더를 다시 만들어 보내고 본문은 받는 대로 흘려보낸다. 백엔드 응답에 Content-Length가 없으면 손님 연결도 닫는다 (Q8). 핸들러는 `ctx->status` · `ctx->bytes` · `ctx->upstream`을 채우고, conn이 접근 로그 한 줄을 남긴다 (Q3).
 
 **완료 확인**
 - 백엔드 2개 실행 후 `for i in 1 2 3 4; do curl -s localhost:8080/api/time; done` → 포트가 8001, 8002 번갈아 나옴

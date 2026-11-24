@@ -1,7 +1,6 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-#include <stdatomic.h>
 #include <stddef.h>
 
 #define CONFIG_MAX_ROUTES 16
@@ -23,7 +22,6 @@ struct route {
     enum route_type type;
     struct backend backends[CONFIG_MAX_BACKENDS];
     int backend_count;
-    atomic_uint rr;                     /* Round-Robin 카운터 (스텝 7에서 여러 워커가 함께 올림) */
 };
 
 // 서버 설정 전체. 시작할 때 한 번 채우고 이후에는 읽기만 한다

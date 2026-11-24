@@ -95,6 +95,21 @@ static int conn_read_request(struct conn *c)
     }
 }
 
+// 접근 로그 한 줄을 stderr에 남긴다: 시각 IP "메서드 경로" 상태 본문바이트 걸린ms [백엔드]
+// 이유: 어느 요청이 어디로 가서 무엇을 받았는지 서버 쪽에서 보이게 한다 (Q5 지도 Q3)
+static void conn_log(const struct conn *c, int status, size_t bytes, const char *upstream, long ms)
+{
+    char ts[32];
+    time_t now = time(NULL);
+    struct tm tm;
+    gmtime_r(&now, &tm);
+    strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%SZ", &tm);
+    const struct http_message *m = &c->parser.msg;
+    // fprintf 한 번은 stdio가 스트림을 잠근 채 쓰므로 여러 워커의 줄이 섞이지 않는다
+    fprintf(stderr, "%s %s \"%s %s\" %d %zu %ldms%s%s\n", ts, c->ip, m->method, m->target, status,
+            bytes, ms, upstream[0] ? " " : "", upstream);
+}
+
 // 오류 응답을 보내고, 닫을 때 lingering close를 하도록 표시한다
 // 이유: 오류 뒤에는 요청 경계를 믿을 수 없어 닫는다. HEAD면 본문을 빼야 한다 (Q4)
 static void conn_send_error(struct conn *c, int status)
@@ -106,6 +121,7 @@ static void conn_send_error(struct conn *c, int status)
                   : http_build_error(&out, status, 0);
     c->linger = rc == 0 && net_write_all(c->fd, out.data, out.len) == 0;
     buf_free(&out);
+    conn_log(c, status, 0, "", 0);
 }
 
 // request_ctx를 채우고 라우터가 고른 핸들러를 호출한다. 핸들러 반환값 (0 계속 가능, -1 닫기)
@@ -119,8 +135,15 @@ static int conn_dispatch(struct conn *c)
         conn_send_error(c, 404);
         return -1;
     }
-    struct request_ctx ctx = {c->fd, c->ip, m, c->in.data, m->total_len, c->keep, r, c->cfg};
-    return router_handler(r)(&ctx);
+    // 이름 붙인 초기화: 적지 않은 칸(status · bytes · upstream)은 0으로 채워진다
+    struct request_ctx ctx = {.fd = c->fd, .ip = c->ip, .msg = m, .raw = c->in.data,
+                              .raw_len = m->total_len, .keep_alive = c->keep, .route = r,
+                              .cfg = c->cfg};
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    int rc = router_handler(r)(&ctx);
+    conn_log(c, ctx.status, ctx.bytes, ctx.upstream, elapsed_ms(&start));
+    return rc;
 }
 
 // 핸들러 결과와 keep-alive 결정으로 연결을 계속 쓸지 정한다. 계속이면 1

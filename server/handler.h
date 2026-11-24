@@ -16,6 +16,10 @@ struct request_ctx {
     int keep_alive;                     /* 응답의 Connection 헤더 값 */
     const struct route *route;          /* 라우터가 고른 라우트 */
     const struct server_config *cfg;    /* 설정 (루트 · 타임아웃 등, 읽기 전용) */
+    /* 핸들러가 채워 돌려주는 칸 (접근 로그용, Q5 지도 Q3) */
+    int status;                         /* 손님에게 보낸 상태 코드 */
+    size_t bytes;                       /* 손님에게 보낸 본문 바이트 수 */
+    char upstream[24];                  /* 프록시가 고른 백엔드 "IP:포트" (정적이면 빈 문자열) */
 };
 
 // 핸들러: 요청 하나를 처리해 응답을 보낸다. 0 = 계속 가능, -1 = 연결을 닫아야 함

@@ -187,8 +187,10 @@ int static_handle(struct request_ctx *ctx)
     buf_init(&out);
     const char *method = ctx->msg->method;
     int head = strcmp(method, "HEAD") == 0;
-    if (!head && strcmp(method, "GET") != 0)
+    if (!head && strcmp(method, "GET") != 0) {
+        ctx->status = 405;
         return send_built(ctx->fd, &out, http_build_error(&out, 405, ctx->keep_alive));
+    }
 
     const char *target = ctx->msg->target;
     size_t plen = strcspn(target, "?");
@@ -198,6 +200,7 @@ int static_handle(struct request_ctx *ctx)
     int rc = static_resolve_path(ctx->cfg->root, target, path, sizeof path);
     if (rc == 0)
         rc = open_file(path, sizeof path, target[plen - 1] == '/', &fd, &size);
+    ctx->status = rc == 0 ? 200 : rc; /* 접근 로그용 (Q5 지도 Q3) */
     if (rc == 301) {
         char loc[HTTP_LINE_MAX + 32];
         // Location = 경로 + "/" + 원래 쿼리 (target은 파서가 제어 문자를 걸렀으므로 헤더에 그대로 넣어도 안전)
@@ -218,6 +221,7 @@ int static_handle(struct request_ctx *ctx)
     int ok = http_build_header(&out, 200, type, (long)size, ctx->keep_alive, NULL) == 0
              && net_write_all(ctx->fd, out.data, out.len) == 0
              && (head || send_file_body(ctx->fd, fd, size) == 0);
+    ctx->bytes = ok && !head ? (size_t)size : 0;
     buf_free(&out);
     close(fd);
     return ok ? 0 : -1;

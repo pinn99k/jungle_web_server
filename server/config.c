@@ -69,7 +69,6 @@ static const char *parse_route_line(struct server_config *c, char *line)
     struct route *r = &c->routes[c->route_count];
     snprintf(r->prefix, sizeof r->prefix, "%s", prefix);
     r->backend_count = 0;
-    atomic_init(&r->rr, 0);
     if (strcmp(type, "static") == 0) {
         r->type = ROUTE_STATIC;
         if (strtok_r(NULL, " \t", &save) != NULL)

@@ -2,7 +2,9 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -97,4 +99,57 @@ int net_set_timeout(int fd, int recv_ms, int send_ms)
     if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rt, sizeof rt) < 0)
         return -1;
     return setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &st, sizeof st);
+}
+
+// 논블로킹으로 connect를 시작하고, 끝날 때까지 최대 timeout_ms 기다린다. 성공 0, 실패 -1 (errno 설정)
+// 이유: 블로킹 connect는 응답 없는 주소에서 수십 초 멈출 수 있어, 백엔드 연결 1초 제한을 지킬 수 없다
+static int connect_with_timeout(int fd, const struct sockaddr_in *addr, int timeout_ms)
+{
+    if (connect(fd, (const struct sockaddr *)addr, sizeof *addr) == 0)
+        return 0;
+    if (errno != EINPROGRESS)
+        return -1;
+    struct pollfd pfd = {fd, POLLOUT, 0};
+    int pr;
+    do {
+        pr = poll(&pfd, 1, timeout_ms);
+    } while (pr < 0 && errno == EINTR);
+    if (pr <= 0) {
+        if (pr == 0)
+            errno = ETIMEDOUT;
+        return -1;
+    }
+    // 연결이 끝났다는 신호만으로는 성공인지 모르므로, 소켓에 남은 오류를 꺼내 본다
+    int err = 0;
+    socklen_t len = sizeof err;
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0)
+        return -1;
+    errno = err;
+    return err == 0 ? 0 : -1;
+}
+
+// 숫자 IPv4 host:port에 timeout_ms 안에 연결해 fd(블로킹)를 반환한다. 실패 -1 (시간 초과면 errno = ETIMEDOUT)
+// 이유: 프록시가 백엔드에 거는 "연결 2"를 만든다. 연결 뒤에는 블로킹으로 되돌려 나머지 코드는 그대로 쓴다
+int net_connect(const char *host, uint16_t port, int timeout_ms)
+{
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+        errno = EINVAL;
+        return -1;
+    }
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+        return -1;
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0
+        || connect_with_timeout(fd, &addr, timeout_ms) < 0 || fcntl(fd, F_SETFL, flags) < 0) {
+        int err = errno;
+        close(fd);
+        errno = err;
+        return -1;
+    }
+    return fd;
 }
