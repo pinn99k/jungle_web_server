@@ -209,7 +209,8 @@ int static_handle(struct request_ctx *ctx)
         return send_built(ctx->fd, &out, built);
     }
     if (rc != 0 && head) /* HEAD 응답에는 본문이 없어야 하므로 오류여도 헤더만 (Q4) */
-        return send_built(ctx->fd, &out, http_build_header(&out, rc, NULL, 0, ctx->keep_alive, NULL));
+        return send_built(ctx->fd, &out,
+                          http_build_header(&out, rc, NULL, 0, ctx->keep_alive, NULL));
     if (rc != 0)
         return send_built(ctx->fd, &out, http_build_error(&out, rc, ctx->keep_alive));
 
