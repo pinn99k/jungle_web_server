@@ -471,6 +471,9 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 | `int main(int argc, char **argv)` | 포트 인자로 리스닝하고, 연결을 하나씩 받아 처리한다 (단일 스레드) |
 | `static void handle_conn(int fd, uint16_t port)` | 요청 하나를 읽고 파싱한 뒤 경로에 맞는 응답을 보내고 닫는다 |
 | `static void respond(int fd, int status, const char *type, const char *body, size_t len)` | 헤더와 본문을 조립해 보낸다 |
+| `static void respond_error(int fd, int status)` · `static int path_is(const char *target, const char *path)` · `static void route_request(...)` | 오류 응답 · `?` 앞 경로 비교 · 메서드와 경로로 기능 고르기 | 구현 중 추가 |
+
+`/api/echo`는 요청의 `Content-Type`을 그대로 돌려준다 (없으면 `application/octet-stream`). `/api/time`의 시각은 UTC (`2026-11-24T10:00:00Z`). 메서드가 맞지 않으면(예: `GET /api/echo`) 404.
 
 | 경로 | 동작 |
 |---|---|
@@ -578,4 +581,8 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 | R3 | 백엔드 연결 재사용 (커넥션 풀) | proxy | 매 요청 handshake 비용 제거 |
 | R4 | 포워드 프록시 + 캐시 | router, proxy | absolute-form URI, 캐시 정책 |
 | R5 | chunked 인코딩 지원 | http_parser | 본문 길이를 모르는 메시지 처리 |
+| R7 | 실패한 백엔드 잠시 빼기 (nginx max_fails · fail_timeout) | proxy | 백엔드마다 원자적 `down_until` 시각, pick_backend가 건너뜀. 죽은 백엔드 때문에 요청마다 1초 늦는 것을 없앰 |
+| R8 | 워커마다 Round-Robin 카운터 (Envoy · nginx 기본) | proxy | `_Thread_local` 카운터. 정확한 교대 vs 경쟁 없음의 맞바꿈, wrk로 비교 |
+| R9 | 서버를 끄지 않고 설정 다시 읽기 (SIGHUP, nginx reload) | config, conn | 새 설정을 만들어 포인터를 원자적으로 교체, 옛 설정을 언제 해제하나 (참조 수 · RCU) |
+| R10 | 가중치 분배 (nginx smooth weighted round-robin) | config, proxy | 점수 여러 개를 함께 바꿔야 해서 원자적 변수가 아니라 락이 필요한 경우 |
 | R6 | keep-alive 대기가 워커를 붙잡는 문제 (Q4 지도 Q11) | conn, config | 빠른 해법: 요청 사이 대기만 1초로 (`keepalive_timeout_ms`). 근본 해법: R1 epoll. 측정 기준: `ab -k -n 300 -c 9` 마지막 요청 대기 약 5초 |

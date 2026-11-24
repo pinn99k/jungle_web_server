@@ -1,4 +1,4 @@
-# make        → build/server
+# make        → build/server, build/backend
 # make test   → tests/test_*.c를 각각 빌드 · 실행 (하나라도 실패하면 종료 코드 1)
 # make asan   → ASan + UBSan으로 서버와 테스트를 빌드하고 테스트까지 실행
 # make clean
@@ -14,13 +14,17 @@ COMMON_SRC := common/buf.c common/net.c common/http_parser.c common/http_respons
 LIB_SRC    := $(COMMON_SRC) server/mime.c server/static_handler.c server/config.c server/router.c \
               server/proxy.c server/thread_pool.c server/conn.c
 SERVER_SRC := server/main.c $(LIB_SRC)
+# 백엔드는 common/만 쓴다 (server/ 모듈을 링크하지 않음)
+BACKEND_SRC := backend/main.c $(COMMON_SRC)
 TEST_SRC   := $(wildcard tests/test_*.c)
 
 SERVER_OBJ := $(SERVER_SRC:%.c=$(BUILD)/obj/%.o)
+BACKEND_OBJ := $(BACKEND_SRC:%.c=$(BUILD)/obj/%.o)
 COMMON_OBJ := $(LIB_SRC:%.c=$(BUILD)/obj/%.o)
 TESTS      := $(TEST_SRC:tests/%.c=$(BUILD)/tests/%)
 
 ASAN_OBJ        := $(SERVER_SRC:%.c=$(BUILD)/asan/obj/%.o)
+ASAN_BACKEND_OBJ := $(BACKEND_SRC:%.c=$(BUILD)/asan/obj/%.o)
 ASAN_COMMON_OBJ := $(LIB_SRC:%.c=$(BUILD)/asan/obj/%.o)
 ASAN_TESTS      := $(TEST_SRC:tests/%.c=$(BUILD)/asan/tests/%)
 
@@ -28,9 +32,12 @@ ASAN_TESTS      := $(TEST_SRC:tests/%.c=$(BUILD)/asan/tests/%)
 # 테스트 .o를 중간 파일로 보고 지우면 매번 다시 컴파일하므로 남겨 둔다
 .SECONDARY:
 
-all: $(BUILD)/server
+all: $(BUILD)/server $(BUILD)/backend
 
 $(BUILD)/server: $(SERVER_OBJ)
+	$(CC) $(LDFLAGS) -o $@ $^
+
+$(BUILD)/backend: $(BACKEND_OBJ)
 	$(CC) $(LDFLAGS) -o $@ $^
 
 $(BUILD)/tests/%: $(BUILD)/obj/tests/%.o $(COMMON_OBJ)
@@ -44,10 +51,13 @@ $(BUILD)/obj/%.o: %.c
 test: $(TESTS)
 	@for t in $(TESTS); do echo "== $$t"; $$t || exit 1; done
 
-asan: $(BUILD)/asan/server $(ASAN_TESTS)
+asan: $(BUILD)/asan/server $(BUILD)/asan/backend $(ASAN_TESTS)
 	@for t in $(ASAN_TESTS); do echo "== $$t"; $$t || exit 1; done
 
 $(BUILD)/asan/server: $(ASAN_OBJ)
+	$(CC) $(LDFLAGS) -fsanitize=address,undefined -o $@ $^
+
+$(BUILD)/asan/backend: $(ASAN_BACKEND_OBJ)
 	$(CC) $(LDFLAGS) -fsanitize=address,undefined -o $@ $^
 
 $(BUILD)/asan/tests/%: $(BUILD)/asan/obj/tests/%.o $(ASAN_COMMON_OBJ)
@@ -61,5 +71,6 @@ $(BUILD)/asan/obj/%.o: %.c
 clean:
 	rm -rf $(BUILD)
 
--include $(SERVER_OBJ:.o=.d) $(ASAN_OBJ:.o=.d) $(TEST_SRC:%.c=$(BUILD)/obj/%.d) \
+-include $(SERVER_OBJ:.o=.d) $(ASAN_OBJ:.o=.d) $(BACKEND_OBJ:.o=.d) $(ASAN_BACKEND_OBJ:.o=.d) \
+         $(TEST_SRC:%.c=$(BUILD)/obj/%.d) \
          $(TEST_SRC:%.c=$(BUILD)/asan/obj/%.d)
