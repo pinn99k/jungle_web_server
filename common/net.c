@@ -5,6 +5,7 @@
 #include <netinet/in.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 // 모든 IPv4 주소의 port에서 연결을 기다리는 리스닝 fd를 반환한다. 실패 -1
@@ -85,4 +86,15 @@ int net_write_all(int fd, const void *data, size_t n)
         n -= (size_t)w;
     }
     return 0;
+}
+
+// 소켓의 읽기 · 쓰기 타임아웃을 밀리초로 건다. 넘으면 read · write가 EAGAIN으로 실패한다. 성공 0, 실패 -1
+// 이유: 블로킹 I/O에서 아무것도 안 보내는 손님 · 안 읽는 손님이 워커를 영원히 붙잡지 못하게 한다
+int net_set_timeout(int fd, int recv_ms, int send_ms)
+{
+    struct timeval rt = {recv_ms / 1000, (recv_ms % 1000) * 1000};
+    struct timeval st = {send_ms / 1000, (send_ms % 1000) * 1000};
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rt, sizeof rt) < 0)
+        return -1;
+    return setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &st, sizeof st);
 }

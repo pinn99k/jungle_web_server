@@ -195,7 +195,7 @@ int static_handle(struct request_ctx *ctx)
     char path[PATH_MAX + 16];
     int fd = -1;
     off_t size = 0;
-    int rc = static_resolve_path(ctx->root, target, path, sizeof path);
+    int rc = static_resolve_path(ctx->cfg->root, target, path, sizeof path);
     if (rc == 0)
         rc = open_file(path, sizeof path, target[plen - 1] == '/', &fd, &size);
     if (rc == 301) {
@@ -208,6 +208,8 @@ int static_handle(struct request_ctx *ctx)
             built = http_build_header(&out, 301, NULL, 0, ctx->keep_alive, loc);
         return send_built(ctx->fd, &out, built);
     }
+    if (rc != 0 && head) /* HEAD 응답에는 본문이 없어야 하므로 오류여도 헤더만 (Q4) */
+        return send_built(ctx->fd, &out, http_build_header(&out, rc, NULL, 0, ctx->keep_alive, NULL));
     if (rc != 0)
         return send_built(ctx->fd, &out, http_build_error(&out, rc, ctx->keep_alive));
 

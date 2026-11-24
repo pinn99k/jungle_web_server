@@ -19,7 +19,7 @@ docker compose down              # 끝낼 때
 make                    # build/server
 make test               # 단위 테스트 (tests/test_*.c)
 make asan               # ASan + UBSan으로 서버 · 테스트 빌드 후 테스트 실행
-./build/server -c conf/server.conf      # 지금은 스텝 4: 설정 · 라우팅. / 는 정적 파일, /api/ 는 임시 502
+./build/server -c conf/server.conf      # 지금은 스텝 5: 워커 8개 동시 처리 · keep-alive. / 는 정적 파일, /api/ 는 임시 502
 ./build/server -p 9090 -r ./www         # 인자가 설정 파일 값을 덮어씀 (-c 없으면 정적 서버만)
 curl -v localhost:8080/
 ```

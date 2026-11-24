@@ -30,7 +30,7 @@ C로 만드는 HTTP 웹 서버 + 리버스 프록시의 설계 문서입니다. 
 - 정적 파일 서빙: MIME 매핑, 403 / 404 / 500
 - 리버스 프록시: 경로 기반 라우팅, Round-Robin, 백엔드 실패 시 502 / 504
 - 테스트용 백엔드: `/api/echo`, `/api/time`, `/api/slow`
-- 스레드 풀 기반 동시 처리 (결정 대기, 5장 참고)
+- 스레드 풀 기반 동시 처리 (D1 확정, 5장 참고)
 - SIGINT / SIGTERM 안전 종료, SIGPIPE 무시
 - 단위 테스트, 기능 테스트, 부하 테스트, ASan 검사
 
@@ -152,18 +152,11 @@ mini_web_server/
 
 ## 5. 결정 사항
 
-### 결정 대기
-
-| ID | 항목 | 추천 | 기록 |
-|---|---|---|---|
-| D1 | 동시성 모델 | A. 스레드 풀 + 블로킹 I/O | `docs/adr/0001-concurrency-model.md` |
-
-D1이 정해지기 전까지 스텝 1~4는 영향을 받지 않습니다. 스텝 5부터 영향을 받습니다.
-
 ### 확정
 
 | ID | 항목 | 결정 | 기록 |
 |---|---|---|---|
+| D1 | 동시성 모델 | A. 스레드 풀 + 블로킹 I/O (2026-11-23) | `docs/adr/0001-concurrency-model.md` |
 | D2 | 프록시 종류, 폴더 구조 | 리버스 프록시. `server/` + `backend/` + `common/` | `docs/adr/0002-structure-and-proxy.md` |
 
 ### 기본값 (바꾸려면 이 표를 고친 뒤 구현)
@@ -416,7 +409,7 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 
 **완료 확인**: `./build/server -c conf/server.conf`로 실행. `-p 9090`으로 포트 덮어쓰기. `/api/`는 임시 502, 나머지는 정적 파일.
 
-### 스텝 5. 스레드 풀과 연결 수명 (D1 결정 후)
+### 스텝 5. 스레드 풀과 연결 수명 (D1 = 스레드 풀 확정)
 
 목표: 여러 연결을 동시에 처리하고, 한 연결에서 여러 요청을 처리합니다(keep-alive). 느린 클라이언트는 타임아웃으로 끊습니다.
 
@@ -428,8 +421,9 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 | `int pool_submit(struct thread_pool *p, int fd, const char *ip)` | 작업 큐에 연결을 넣고 워커 하나를 깨운다. 큐가 가득 차면 -1 (호출한 쪽이 503 응답) | server/main.c |
 | `void pool_shutdown(struct thread_pool *p)` | 새 작업을 막고, 남은 작업을 처리한 뒤 모든 워커를 종료·회수하고 해제한다 | server/main.c |
 | `static void *worker_main(void *arg)` | 큐에서 작업을 꺼내 `work` 함수를 실행하는 것을 반복한다 | 내부 (스레드 시작 함수) |
+| `static void pool_destroy(struct thread_pool *p, int started)` | 워커를 깨워 끝내고 회수한 뒤 해제한다. `pool_create` 중간 실패와 `pool_shutdown`이 같이 씀 | 내부 (구현 중 추가) |
 
-`pool_work_fn`의 형태: `void (*)(int fd, const char *ip, void *arg)`
+`pool_work_fn`의 형태: `void (*)(int fd, const char *ip, void *arg)`. 큐는 원형 배열 + mutex 1개 + 조건 변수 1개(비었음). 넣기는 기다리지 않는다.
 
 **server/conn.h**
 
@@ -442,6 +436,11 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 | `static int conn_dispatch(struct conn *c)` | `request_ctx`를 채우고 라우터가 고른 핸들러를 호출한다 | 내부 |
 | `static void conn_send_error(struct conn *c, int status)` | 오류 응답을 만들어 보낸다 | 내부 |
 | `static int conn_should_continue(struct conn *c, int handler_rc)` | 핸들러 결과, keep-alive 여부, 처리 요청 수로 연결 유지 여부를 정한다 | 내부 |
+| `static long elapsed_ms(const struct timespec *start)` · `static void lingering_close(int fd)` | 단조 시계로 경과 시간 · 쓰기만 닫고 남은 입력을 1초 · 64KB까지 버리기 (Q2) | 내부 (구현 중 추가) |
+
+`conn_read_request`의 결과는 5가지: DONE · ERROR · CLOSED · IDLE(요청 사이 대기 중 5초, 조용히 닫음) · TIMEOUT(요청 도중, 408). keep-alive 여부는 응답 헤더를 쓰기 전 `conn_dispatch`에서 정한다 (연결당 100번째 요청이면 `Connection: close`). 404(라우트 없음)도 `conn_send_error`로 보내고 닫는다.
+
+`server/main.c`의 `reject_busy(fd)`: 큐가 가득 차면 503을 보내고 바로 닫는다 (Q10).
 
 `conn_serve()` 반복 한 번의 흐름:
 1. `conn_read_request()`. 시간 초과면 408을 보내고 종료. 클라이언트가 끊었으면 그냥 종료.
@@ -450,7 +449,11 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 4. `buf_consume(total_len)`으로 처리한 요청을 버퍼에서 지우고, 파서를 다시 초기화.
 5. `conn_should_continue()`가 참이면 1로. 버퍼에 남은 바이트(파이프라이닝)가 있으면 그것부터 파싱.
 
-**server/main.c** (갱신): `on_connection()` 작업 함수 = `conn_new` → `conn_serve` → `conn_free`.
+**server/main.c** (갱신): `on_connection()` 작업 함수 = `conn_new` → `conn_serve` → `conn_free`. 시작할 때 `sigaction`으로 SIGPIPE를 무시한다 (스텝 8에서 앞당김, Q4 지도 Q3).
+
+**common/net.h에 추가** (스텝 7에서 앞당김): `int net_set_timeout(int fd, int recv_ms, int send_ms)` — conn이 연결마다 읽기 · 쓰기 타임아웃을 건다.
+
+**연결 닫기** (Q4 지도 Q2): 오류 응답을 보냈거나 읽지 않은 입력이 남은 채 닫을 때는 `shutdown(SHUT_WR)` → 남은 입력을 최대 1초 · 64KB 읽어 버림 → `close` (lingering close). HEAD 요청의 오류 응답에는 본문을 넣지 않는다 (Q4).
 
 **완료 확인**
 - `curl -v localhost:8080/a.html localhost:8080/b.css` → 같은 연결 재사용 (`Re-using existing connection` 출력)
@@ -489,7 +492,7 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 | 함수 | 한 줄 설명 | 호출하는 곳 |
 |---|---|---|
 | `int net_connect(const char *host, uint16_t port, int timeout_ms)` | 제한 시간 안에 서버에 연결해 fd를 반환한다. 실패 -1 | proxy.c, 나중의 client |
-| `int net_set_timeout(int fd, int recv_ms, int send_ms)` | 소켓의 읽기·쓰기 타임아웃을 설정한다 | conn.c(스텝 5), proxy.c |
+| `int net_set_timeout(int fd, int recv_ms, int send_ms)` | 소켓의 읽기·쓰기 타임아웃을 설정한다 (스텝 5에서 이미 만듦) | conn.c(스텝 5), proxy.c |
 
 **server/proxy.h**
 
@@ -514,7 +517,7 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 | 함수 | 한 줄 설명 |
 |---|---|
 | `int main(int argc, char **argv)` | 설정 → 시그널 → 리스닝 → 스레드 풀 → accept 루프 → 종료 정리 |
-| `static void install_signals(void)` | SIGPIPE를 무시하고, SIGINT/SIGTERM에 종료 플래그 핸들러를 건다. `SA_RESTART`를 쓰지 않아 `accept()`가 깨어나게 한다 |
+| `static void install_signals(void)` | SIGINT/SIGTERM에 종료 플래그 핸들러를 건다 (SIGPIPE 무시는 스텝 5에서 이미 함). `SA_RESTART`를 쓰지 않아 `accept()`가 깨어나게 한다 |
 | `static void on_signal(int sig)` | 원자적 종료 플래그만 세운다 (async-signal-safe) |
 | `static void accept_loop(int lfd, struct thread_pool *pool)` | 종료 플래그가 설 때까지 연결을 받아 풀에 넣는다. 큐가 가득 차면 503 응답 후 닫는다 |
 | `static void on_connection(int fd, const char *ip, void *arg)` | 워커가 실행하는 작업: `conn_new` → `conn_serve` → `conn_free` |
@@ -575,3 +578,4 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 | R3 | 백엔드 연결 재사용 (커넥션 풀) | proxy | 매 요청 handshake 비용 제거 |
 | R4 | 포워드 프록시 + 캐시 | router, proxy | absolute-form URI, 캐시 정책 |
 | R5 | chunked 인코딩 지원 | http_parser | 본문 길이를 모르는 메시지 처리 |
+| R6 | keep-alive 대기가 워커를 붙잡는 문제 (Q4 지도 Q11) | conn, config | 빠른 해법: 요청 사이 대기만 1초로 (`keepalive_timeout_ms`). 근본 해법: R1 epoll. 측정 기준: `ab -k -n 300 -c 9` 마지막 요청 대기 약 5초 |
