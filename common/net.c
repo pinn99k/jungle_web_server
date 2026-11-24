@@ -15,6 +15,7 @@
 // 이유: socket → bind → listen 순서와 실패 시 fd 정리를 한 곳에 모아 호출하는 쪽을 단순하게 한다
 int net_listen(uint16_t port, int backlog)
 {
+    // 핵심: 이때의 fd는 번호도 상대도 없는 "빈 전화기"다. bind로 번호(포트)를 붙이고 listen으로 받을 준비를 한다
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0)
         return -1;
@@ -27,10 +28,14 @@ int net_listen(uint16_t port, int backlog)
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof addr);
     addr.sin_family = AF_INET;
+    // INADDR_ANY = 이 컴퓨터의 모든 IP. 127.0.0.1로 오든 Docker 관문(172.x)으로 오든 받는다.
+    // 네트워크는 큰 자리부터 보내는 순서라 htonl · htons로 바꾼다 (안 바꾸면 8080이 36895번 포트가 됨)
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons(port);
     if (bind(fd, (struct sockaddr *)&addr, sizeof addr) < 0)
         goto fail;
+    // 핵심: 이 순간부터 커널이 손님과의 3-way handshake를 대신 끝내고, 끝난 연결을 backlog 칸까지
+    //       대기 줄에 넣어 둔다. 우리 코드는 accept로 꺼내기만 한다 (서버가 바빠도 손님은 "연결됨")
     if (listen(fd, backlog) < 0)
         goto fail;
     return fd;
@@ -50,6 +55,8 @@ int net_accept(int lfd, char *ip, size_t ip_len)
 {
     struct sockaddr_in addr;
     socklen_t len = sizeof addr;
+    // 핵심: 대기 줄이 비어 있으면 이 스레드는 여기서 잠든다 (블로킹). 돌려받는 fd는 이 손님 전용의
+    //       새 소켓이고, lfd는 그대로 남아 다음 손님을 받는다 (리스닝 소켓 1개 + 손님마다 연결 소켓)
     int fd = accept(lfd, (struct sockaddr *)&addr, &len);
     if (fd < 0)
         return -1;
@@ -65,6 +72,8 @@ ssize_t net_read(int fd, void *buf, size_t n)
 {
     ssize_t r;
     do {
+        // 핵심: 커널 수신 버퍼에 지금 도착해 있는 만큼만 꺼낸다 (최대 n). 요청 경계와 상관없이 끊기므로
+        //       호출한 쪽이 쌓아서 파서에 맡겨야 한다. 아직 없으면 여기서 잠들고, 0이면 손님이 연결을 닫은 것
         r = read(fd, buf, n);
     } while (r < 0 && errno == EINTR);
     return r;
@@ -76,6 +85,8 @@ int net_write_all(int fd, const void *data, size_t n)
 {
     const char *p = data;
     while (n > 0) {
+        // 핵심: 돌아왔다는 건 손님에게 도착했다는 뜻이 아니라 커널 송신 버퍼에 복사됐다는 뜻이다.
+        //       자리가 모자라면 일부만 복사하고 그 바이트 수를 돌려준다 → 남은 만큼 다시 쓴다
         ssize_t w = write(fd, p, n);
         if (w < 0) {
             if (errno == EINTR)

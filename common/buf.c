@@ -21,14 +21,19 @@ int buf_append(struct buf *b, const char *data, size_t n)
 {
     if (n == 0)
         return 0;
+    // len + n이 size_t 최댓값을 넘으면 작은 수로 되돌아가, 작은 버퍼에 큰 데이터를 쓰게 된다 (넘침 방어)
     if (n > SIZE_MAX - b->len)
         return -1;
     size_t need = b->len + n;
     if (need > b->cap) {
         size_t cap = b->cap ? b->cap : BUF_INIT_CAP;
+        // 핵심: 2배씩 늘리면 복사가 가끔만 일어나 붙이기 한 번의 평균 비용이 일정하다
+        //       (모자란 만큼만 늘리면 붙일 때마다 전체를 복사하게 됨)
         while (cap < need)
             cap = (cap > SIZE_MAX / 2) ? need : cap * 2;
-        // realloc이 실패해도 기존 data는 그대로 남으므로 새 포인터로 받는다
+        // realloc이 실패해도 기존 data는 그대로 남으므로 새 포인터로 받는다.
+        // 핵심: realloc은 메모리를 다른 곳으로 옮길 수 있다 → 전에 b->data 안을 가리키던 포인터는 모두
+        //       무효가 된다. 그래서 파서는 위치를 포인터가 아니라 "시작부터 몇 번째"(pos)로 기억한다 (스텝 2)
         char *p = realloc(b->data, cap);
         if (p == NULL)
             return -1;
@@ -48,6 +53,7 @@ void buf_consume(struct buf *b, size_t n)
         b->len = 0;
         return;
     }
+    // 옮기는 앞뒤 영역이 겹치므로 memcpy가 아니라 memmove (memcpy는 겹치면 결과가 정해지지 않음)
     memmove(b->data, b->data + n, b->len - n);
     b->len -= n;
 }
