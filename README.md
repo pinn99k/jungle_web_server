@@ -22,6 +22,8 @@ make asan               # ASan + UBSan으로 서버 · 테스트 빌드 후 테�
 ./build/server -c conf/server.conf      # 지금은 스텝 7: / 는 정적 파일, /api/ 는 백엔드 8001 · 8002로 번갈아 (리버스 프록시)
 ./build/server -p 9090 -r ./www         # 인자가 설정 파일 값을 덮어씀 (-c 없으면 정적 서버만)
 ./build/backend 8001 & ./build/backend 8002 &    # 테스트용 백엔드 (/api/time · /api/echo · /api/slow)
+tests/functional.sh                     # 기능 테스트 (서버 · 백엔드를 스스로 띄움, 종료 코드 = 실패 수)
+# 종료: Ctrl+C 또는 kill -TERM → 새 연결을 막고 진행 중인 요청을 마무리한 뒤 끝남
 curl -v localhost:8080/
 ```
 

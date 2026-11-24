@@ -531,6 +531,10 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 
 **tests/functional.sh**: 서버와 백엔드를 띄우고 curl로 8장 대응표의 항목을 확인합니다.
 
+구현 중 추가: `static struct thread_pool *start_pool(cfg)` — SIGINT · SIGTERM을 막은 채 풀을 만들고 main에서만 다시 받음. `int net_set_nodelay(int fd)` — 손님 연결에 TCP_NODELAY (wrk 측정에서 keep-alive 요청마다 약 50ms 멈춤 발견: 헤더 · 본문을 나눠 쓰면 Nagle이 손님의 지연 ACK까지 두 번째 조각을 붙잡음. 켠 뒤 초당 77 → 2,108건).
+
+구현에서 정한 것 (Q6 지도): `net_accept`는 EINTR을 다시 시도하지 않고 -1을 돌려준다 (Q1, 스텝 1 약속을 바꿈). `pool_create` 전에 SIGINT · SIGTERM을 막고 main에서만 푼다 (Q3). 종료 플래그는 `conn.c`의 `atomic_int conn_stopping` — 서면 conn은 지금 요청의 응답을 `Connection: close`로 보내고 끝낸다 (Q2). 종료 순서: 플래그 → accept 루프 탈출 → 리스닝 fd close → `pool_shutdown` (큐의 연결까지 처리) → 종료.
+
 **누수 확인**: 시그널 처리가 생겼으므로 `build/asan/server`를 Ctrl+C로 정상 종료시켜 서버 전체 누수를 처음으로 확인합니다 (`make asan`은 스텝 1에서 만듦).
 
 **완료 확인**

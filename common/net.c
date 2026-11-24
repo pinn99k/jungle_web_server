@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -42,17 +43,14 @@ fail:;
     return -1;
 }
 
-// 연결 하나를 받아 fd를 반환하고, 클라이언트 IP 문자열을 ip에 적는다. 실패 -1
-// 이유: 시그널로 깨어난 실패(EINTR)는 진짜 오류가 아니므로 호출하는 쪽이 신경 쓰지 않게 여기서 다시 시도한다
+// 연결 하나를 받아 fd를 반환하고, 클라이언트 IP 문자열을 ip에 적는다. 실패 -1 (시그널로 깨면 errno = EINTR)
+// 이유: accept는 "기다리는 일"이라 시그널로 깨어난 것 자체가 신호다. 다시 잠들지 않고 돌아가
+//       호출한 쪽이 종료 플래그를 보게 한다 (Q6 지도 Q1. read · write는 하던 일을 마저 하려고 재시도)
 int net_accept(int lfd, char *ip, size_t ip_len)
 {
     struct sockaddr_in addr;
-    socklen_t len;
-    int fd;
-    do {
-        len = sizeof addr;
-        fd = accept(lfd, (struct sockaddr *)&addr, &len);
-    } while (fd < 0 && errno == EINTR);
+    socklen_t len = sizeof addr;
+    int fd = accept(lfd, (struct sockaddr *)&addr, &len);
     if (fd < 0)
         return -1;
 
@@ -152,4 +150,13 @@ int net_connect(const char *host, uint16_t port, int timeout_ms)
         return -1;
     }
     return fd;
+}
+
+// 작은 패킷을 모아 보내는 Nagle 알고리즘을 끈다 (TCP_NODELAY). 성공 0, 실패 -1
+// 이유: 헤더와 본문을 나눠 쓰면 Nagle이 두 번째 조각을 손님의 지연 ACK(약 40ms)까지 붙잡아,
+//       keep-alive 요청마다 수십 ms가 멈춘다 (스텝 8 wrk 측정에서 발견)
+int net_set_nodelay(int fd)
+{
+    int on = 1;
+    return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on);
 }

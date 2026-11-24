@@ -22,6 +22,9 @@
 
 enum read_result { READ_DONE, READ_ERROR, READ_CLOSED, READ_IDLE, READ_TIMEOUT };
 
+// 종료 플래그 (CLAUDE.md가 허용한 전역 가변 상태 둘 중 하나). lock-free 원자적 변수라 시그널 핸들러에서 써도 안전
+atomic_int conn_stopping;
+
 // 연결 하나의 상태. 이 연결을 맡은 워커만 쓰므로 락이 없다
 struct conn {
     int fd;
@@ -50,7 +53,8 @@ struct conn *conn_new(int fd, const char *ip, const struct server_config *cfg)
     struct conn *c = malloc(sizeof *c);
     if (c == NULL)
         return NULL;
-    if (net_set_timeout(fd, cfg->client_timeout_ms, cfg->client_timeout_ms) < 0) {
+    if (net_set_timeout(fd, cfg->client_timeout_ms, cfg->client_timeout_ms) < 0
+        || net_set_nodelay(fd) < 0) {
         free(c);
         return NULL;
     }
@@ -130,7 +134,8 @@ static int conn_dispatch(struct conn *c)
 {
     const struct http_message *m = &c->parser.msg;
     const struct route *r = router_match(c->cfg, m->target);
-    c->keep = m->keep_alive && c->requests + 1 < MAX_REQUESTS;
+    // 종료 중이면 이번 응답을 마지막으로 닫는다 (Q6 지도 Q2: 진행 중 요청은 끝까지, 다음 요청은 안 받음)
+    c->keep = m->keep_alive && c->requests + 1 < MAX_REQUESTS && !atomic_load(&conn_stopping);
     if (r == NULL) {
         conn_send_error(c, 404);
         return -1;
