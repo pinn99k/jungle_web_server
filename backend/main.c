@@ -21,7 +21,13 @@
 #define WORK_MAX_MS 10000
 #define COURSES_MS 10
 #define APPLY_MS 100
+#define STATS_MS 2000
+#define COLD_FACTOR 10                  /* 막 켜진 서버는 이만큼 느리다 */
 #define MAX_THREADS 256
+
+// 시작할 때 한 번 정하고 그 뒤로는 읽기만 하는 상황 스위치 (측정용)
+static int fail_mode;                   /* 1이면 모든 요청에 바로 500 */
+static long cold_until_ms;              /* 이 시각까지 모든 일이 COLD_FACTOR배 느림 */
 
 // 헤더와 본문을 조립해 보낸다 (항상 Connection: close)
 // 이유: 프록시가 요청마다 새 연결을 쓰고 Connection: close로 보내므로, 응답 하나 뒤 닫는 게 약속이다
@@ -54,10 +60,21 @@ static int path_is(const char *target, const char *path)
     return strlen(path) == n && strncmp(target, path, n) == 0;
 }
 
-// ms밀리초 기다린다
+// 부팅 뒤 지난 밀리초를 반환한다
+// 이유: 시계가 바뀌어도 거꾸로 가지 않는 시각으로 "막 켜진 상태"가 끝나는 때를 잰다
+static long now_ms(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (long)t.tv_sec * 1000L + t.tv_nsec / 1000000L;
+}
+
+// ms밀리초 기다린다. 막 켜진 상태면 COLD_FACTOR배 기다린다
 // 이유: CPU를 쓰지 않고 기다려 DB를 기다리는 백엔드를 흉내 낸다 (코어를 서버와 나눠 쓰지 않게)
 static void wait_ms(int ms)
 {
+    if (now_ms() < cold_until_ms)
+        ms *= COLD_FACTOR;
     struct timespec ts = {ms / 1000, (ms % 1000) * 1000000L};
     nanosleep(&ts, NULL);
 }
@@ -141,6 +158,18 @@ static void do_courses(int fd, int port, const struct http_message *m, const cha
     respond(fd, 200, "application/json", body, (size_t)n);
 }
 
+// 성적 통계를 2초 동안 만들어 돌려준다
+// 이유: 다른 요청보다 훨씬 오래 걸리는 요청이 섞인 상황을 만든다
+static void do_stats(int fd, int port, const struct http_message *m, const char *raw)
+{
+    (void)m;
+    (void)raw;
+    char body[64];
+    wait_ms(STATS_MS);
+    int n = snprintf(body, sizeof body, "{\"port\":%d,\"stats\":true}\n", port);
+    respond(fd, 200, "application/json", body, (size_t)n);
+}
+
 // 본문 "student=N"의 N(0 이상)을 반환한다. 형식이 다르면 -1
 // 이유: 본문은 NUL로 끝나지 않으므로 길이를 재서 복사한 뒤에만 문자열 함수를 쓴다
 static long student_id(const char *body, size_t len)
@@ -182,6 +211,7 @@ static const struct {
     {"GET", "/api/time", do_time},       {"POST", "/api/echo", do_echo},
     {"GET", "/api/slow", do_slow},       {"GET", "/api/work", do_work},
     {"GET", "/api/courses", do_courses}, {"POST", "/api/apply", do_apply},
+    {"GET", "/api/stats", do_stats},
 };
 
 // 메서드 · 경로에 맞는 기능을 표에서 찾아 실행한다. 없으면 404
@@ -217,7 +247,10 @@ static void handle_conn(int fd, int port)
     }
     if (res == PARSE_DONE) {
         fprintf(stderr, "backend %d: %s %s\n", port, p.msg.method, p.msg.target);
-        route_request(fd, port, &p.msg, in.data);
+        if (fail_mode)
+            respond_error(fd, 500);
+        else
+            route_request(fd, port, &p.msg, in.data);
     } else if (res == PARSE_ERROR) {
         respond_error(fd, p.error_status);
     }
@@ -256,14 +289,31 @@ static long parse_arg(const char *s, long max)
     return (end == s || *end != '\0' || v < 1 || v > max) ? -1 : v;
 }
 
+// 상황 인자를 스위치에 적용한다: "fail" 또는 "cold=밀리초". 성공 0, 모르는 인자 -1
+// 이유: 업데이트 실수(바로 500)와 막 켜진 서버(잠깐 느림)를 코드 수정 없이 만든다
+static int apply_mode(const char *mode)
+{
+    if (strcmp(mode, "fail") == 0) {
+        fail_mode = 1;
+        return 0;
+    }
+    if (strncmp(mode, "cold=", 5) != 0)
+        return -1;
+    long ms = parse_arg(mode + 5, 600000);
+    if (ms < 0)
+        return -1;
+    cold_until_ms = now_ms() + ms;
+    return 0;
+}
+
 // 포트 인자로 리스닝하고, 처리 스레드 수(기본 1)만큼 serve_loop를 돌린다
 // 이유: 기본은 단일 스레드라 /api/slow 5초 동안 다른 요청을 못 받고, 수를 주면 여러 건을 동시에 받는다
 int main(int argc, char **argv)
 {
     long port = argc >= 2 ? parse_arg(argv[1], 65535) : -1;
     long threads = argc >= 3 ? parse_arg(argv[2], MAX_THREADS) : 1;
-    if (argc > 3 || port < 0 || threads < 0) {
-        fprintf(stderr, "사용법: %s <포트> [처리 스레드 수 1~%d]\n", argv[0], MAX_THREADS);
+    if (argc > 4 || port < 0 || threads < 0 || (argc == 4 && apply_mode(argv[3]) < 0)) {
+        fprintf(stderr, "사용법: %s <포트> [처리 스레드 수 1~%d] [fail|cold=밀리초]\n", argv[0], MAX_THREADS);
         return 1;
     }
     struct sigaction sa;
