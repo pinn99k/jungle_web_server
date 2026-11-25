@@ -2,7 +2,6 @@
 
 #include <ctype.h>
 #include <errno.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,11 +12,10 @@
 #include "common/http_parser.h"
 #include "common/http_response.h"
 #include "common/net.h"
+#include "server/balance.h"
+#include "server/gate.h"
 
 #define UPSTREAM_CHUNK 16384
-
-// 라우트마다 하나씩, 여러 워커가 함께 올리는 Round-Robin 카운터. 설정(cfg)은 읽기 전용으로 남긴다 (Q4)
-static atomic_uint rr_counters[CONFIG_MAX_ROUTES];
 
 static const char *const HOP_BY_HOP[] = {
     "Connection", "Keep-Alive", "Proxy-Connection", "TE", "Trailer", "Transfer-Encoding",
@@ -74,32 +72,6 @@ int proxy_path_escapes(const char *target)
         }
     }
     return len == 2 && seg[0] == '.' && seg[1] == '.';
-}
-
-// 이 라우트의 카운터를 원자적으로 1 올려 다음 백엔드 번호를 고른다
-// 이유: 여러 워커가 동시에 골라도 번호가 겹치지 않아 백엔드를 정확히 번갈아 쓴다
-static int pick_backend(const struct request_ctx *ctx)
-{
-    size_t idx = (size_t)(ctx->route - ctx->cfg->routes);
-    unsigned n = atomic_fetch_add(&rr_counters[idx], 1);
-    return (int)(n % (unsigned)ctx->route->backend_count);
-}
-
-// 고른 백엔드에 연결하고, 실패하면 다음 백엔드로 한 번 더 시도한다. 성공 fd, 실패 -1
-// 이유: 백엔드 하나가 죽어도 손님은 502 대신 살아 있는 쪽의 응답을 받게 한다
-static int connect_backend(struct request_ctx *ctx)
-{
-    const struct route *r = ctx->route;
-    int first = pick_backend(ctx);
-    int tries = r->backend_count > 1 ? 2 : 1;
-    for (int t = 0; t < tries; t++) {
-        const struct backend *b = &r->backends[(first + t) % r->backend_count];
-        snprintf(ctx->upstream, sizeof ctx->upstream, "%s:%d", b->host, b->port);
-        int fd = net_connect(b->host, (uint16_t)b->port, ctx->cfg->backend_connect_timeout_ms);
-        if (fd >= 0)
-            return fd;
-    }
-    return -1;
 }
 
 // 형식 문자열 한 줄을 out에 붙인다. 성공 0, 실패(너무 김 · 메모리 부족) -1
@@ -204,7 +176,8 @@ static size_t body_room(long cl, size_t done, size_t max)
     return left < max ? left : max;
 }
 
-// 백엔드 응답을 읽어 손님에게 그대로 흘려보낸다. 0 = 손님 연결 계속 가능, -1 = 닫아야 함
+// 백엔드 응답을 읽어 손님에게 그대로 흘려보낸다. 0 = 손님 연결 계속 가능, -1 = 닫아야 함,
+// 양수 = 손님에게 아무것도 보내기 전에 실패함 (502 · 504, 부른 쪽이 다시 보내거나 오류로 답함)
 // 이유: 응답을 통째로 모으지 않고 받는 대로 보내, 큰 응답도 연결마다 16KB만 쓰게 한다
 static int relay_response(int bfd, struct request_ctx *ctx)
 {
@@ -217,7 +190,8 @@ static int relay_response(int bfd, struct request_ctx *ctx)
     int rc = read_response_head(bfd, &p, &in);
     if (rc != 0) {
         buf_free(&in);
-        return send_error(ctx, rc) == 0 ? 0 : -1;
+        buf_free(&head);
+        return rc;
     }
     long cl = body_length(ctx->msg, &p.msg);
     int keep = ctx->keep_alive && cl >= 0; /* 길이를 모르면 손님 연결도 닫아야 끝을 알린다 (Q8) */
@@ -242,25 +216,152 @@ static int relay_response(int bfd, struct request_ctx *ctx)
     return ok && keep ? 0 : -1;
 }
 
-// 프록시 핸들러: 백엔드 선택 → 연결(실패 502) → 요청 전달 → 응답 중계(시간 초과 504). 0 계속, -1 닫기
+// 백엔드 b에 요청을 한 번 보낸다. 0 · -1은 relay_response와 같고, 양수면 실패 상태 코드
+// *sent는 백엔드에 요청 바이트를 보내기 시작했으면 1 (연결만 실패했으면 0)
+// 이유: 연결 실패는 다시 보내도 안전하지만, 보낸 뒤 실패는 백엔드가 이미 처리했을 수 있어 구분해야 한다
+static int attempt(struct request_ctx *ctx, int b, const struct buf *req, int *sent)
+{
+    const struct backend *be = &ctx->route->backends[b];
+    int timeout = ctx->cfg->backend_timeout_ms;
+    int rc = 502;
+    *sent = 0;
+    ctx->status = 0;
+    snprintf(ctx->upstream, sizeof ctx->upstream, "%s:%d", be->host, be->port);
+    int fd = net_connect(be->host, (uint16_t)be->port, ctx->cfg->backend_connect_timeout_ms);
+    if (fd < 0)
+        return 502;
+    if (net_set_timeout(fd, timeout, timeout) == 0) {
+        *sent = 1;
+        if (net_write_all(fd, req->data, req->len) == 0)
+            rc = relay_response(fd, ctx);
+    }
+    close(fd);
+    return rc;
+}
+
+// 실패한 요청을 다른 백엔드에 다시 보내도 되면 1
+// 이유: 신청처럼 두 번 처리되면 안 되는 요청은 다시 보내지 않고, 조회(GET · HEAD)만 다시 보낸다
+static int safe_to_retry(const struct request_ctx *ctx, int sent)
+{
+    const char *m = ctx->msg->method;
+    if (!sent)
+        return 1;
+    return ctx->cfg->retry_safe && (strcmp(m, "GET") == 0 || strcmp(m, "HEAD") == 0);
+}
+
+// 백엔드를 골라 보내고, 다시 보내도 되는 실패면 다른 백엔드에 한 번 더 보낸다. 0 계속, -1 닫기
+// 이유: 고르기(balance)와 보내기(attempt)를 나눠, 정책을 바꿔도 전달 코드는 그대로다
+static int forward(struct request_ctx *ctx, const struct buf *req)
+{
+    int route = (int)(ctx->route - ctx->cfg->routes);
+    int n = ctx->route->backend_count;
+    int status = 502;
+    unsigned tried = 0;
+    for (int t = 0; t < (n > 1 ? 2 : 1); t++) {
+        int sent;
+        int b = balance_pick(ctx->cfg, route, n, tried, balance_now());
+        if (b < 0)
+            break;
+        balance_begin(route, b);
+        int rc = attempt(ctx, b, req, &sent);
+        balance_end(ctx->cfg, route, b, rc > 0 || ctx->status >= 500, balance_now());
+        if (rc <= 0)
+            return rc;
+        status = rc;
+        tried |= 1u << b;
+        if (!safe_to_retry(ctx, sent))
+            break;
+    }
+    return send_error(ctx, status);
+}
+
+// 짧은 JSON 응답을 보내고 접근 로그 칸을 채운다. extra는 추가 헤더 줄. 보냈으면 0, 실패 -1
+// 이유: 줄 서기 응답(기다림 · 처리 중 · 이미 됨)이 같은 모양으로 나가게 한다
+static int send_json(struct request_ctx *ctx, int status, const char *extra, const char *body)
+{
+    struct buf out;
+    buf_init(&out);
+    size_t len = strlen(body);
+    int rc = -1;
+    if (http_build_header(&out, status, "application/json", (long)len, ctx->keep_alive, extra) == 0
+        && buf_append(&out, body, len) == 0)
+        rc = net_write_all(ctx->fd, out.data, out.len);
+    ctx->status = status;
+    buf_free(&out);
+    return rc;
+}
+
+// Cookie 헤더에서 qticket 값(32자)을 찾아 out에 적는다. 없으면 0, 있으면 1
+// 이유: 웹서버는 번호표만 본다. 누구인지 알려 주는 세션 · 토큰은 백엔드가 본다
+static int ticket_of(const struct request_ctx *ctx, char out[GATE_TICKET_LEN + 1])
+{
+    const char *c = http_header_get(ctx->msg, "Cookie");
+    const char *p = c != NULL ? strstr(c, "qticket=") : NULL;
+    if (p == NULL || strspn(p + 8, "0123456789abcdef") != GATE_TICKET_LEN)
+        return 0;
+    memcpy(out, p + 8, GATE_TICKET_LEN);
+    out[GATE_TICKET_LEN] = '\0';
+    return 1;
+}
+
+// 줄을 세우는 경로의 POST 요청이면 1
+// 이유: 줄 서기를 켜지 않으면(gate_path 없음) 예전과 똑같이 동작한다
+static int gated(const struct request_ctx *ctx)
+{
+    const char *path = ctx->cfg->gate_path;
+    size_t n = strcspn(ctx->msg->target, "?");
+    return path[0] != '\0' && strcmp(ctx->msg->method, "POST") == 0 && strlen(path) == n
+           && strncmp(ctx->msg->target, path, n) == 0;
+}
+
+// 번호표 순서에 따라 들이거나 기다리게 한다. 들어가도 되면 1(번호표는 ticket에), 이미 답했으면 0
+// 이유: 기다리는 손님에게 연결 · 워커를 쓰지 않고 바로 답해, 줄이 길어도 서버가 막히지 않는다
+static int pass_gate(struct request_ctx *ctx, char ticket[GATE_TICKET_LEN + 1], int *rc)
+{
+    const struct server_config *c = ctx->cfg;
+    struct gate_rule rule = {c->gate_slots, c->gate_grace_ms, c->gate_lottery};
+    char mine[GATE_TICKET_LEN + 1];
+    char extra[160];
+    char body[64];
+    int ahead;
+    const char *key = ticket_of(ctx, mine) ? mine : NULL;
+    switch (gate_visit(key, &rule, balance_now(), ticket, &ahead)) {
+    case GATE_PASS:
+        return 1;
+    case GATE_BUSY:
+        *rc = send_json(ctx, 409, "Retry-After: 1\r\n", "{\"running\":true}\n");
+        return 0;
+    case GATE_DONE:
+        *rc = send_json(ctx, 200, NULL, "{\"already\":true}\n");
+        return 0;
+    default:
+        snprintf(extra, sizeof extra, "Set-Cookie: qticket=%s; Path=/; HttpOnly; SameSite=Lax\r\n"
+                 "Retry-After: 1\r\n", ticket);
+        snprintf(body, sizeof body, "{\"ahead\":%d}\n", ahead);
+        *rc = send_json(ctx, 503, ticket[0] ? extra : "Retry-After: 1\r\n", body);
+        return 0;
+    }
+}
+
+// 프록시 핸들러: 줄 서기 → 백엔드 선택 → 전달 → 응답 중계. 0 계속, -1 닫기
 // 이유: 라우터가 /api/처럼 프록시 라우트로 고른 요청을 백엔드와 손님 사이에서 대신 전달한다
 int proxy_handle(struct request_ctx *ctx)
 {
+    char ticket[GATE_TICKET_LEN + 1] = "";
+    struct buf req;
+    int rc = -1;
+    int through = gated(ctx);
     if (proxy_path_escapes(ctx->msg->target))
         return send_error(ctx, 400);
-    int bfd = connect_backend(ctx);
-    if (bfd < 0)
-        return send_error(ctx, 502);
-    struct buf req;
+    if (through && !pass_gate(ctx, ticket, &rc))
+        return rc;
     buf_init(&req);
-    int rc;
-    int timeout = ctx->cfg->backend_timeout_ms;
-    if (net_set_timeout(bfd, timeout, timeout) < 0 || build_upstream_request(ctx, &req) < 0
-        || net_write_all(bfd, req.data, req.len) < 0)
+    if (build_upstream_request(ctx, &req) < 0)
         rc = send_error(ctx, 502);
     else
-        rc = relay_response(bfd, ctx);
+        rc = forward(ctx, &req);
     buf_free(&req);
-    close(bfd);
+    if (through)
+        gate_finish(ticket, ctx->status == 200);
     return rc;
 }

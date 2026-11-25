@@ -19,7 +19,6 @@
 #include "server/thread_pool.h"
 
 #define LISTEN_BACKLOG 128
-#define QUEUE_CAP 128                   /* 작업 큐 크기 (5장 기본값) */
 #define EMFILE_BACKOFF_NS 100000000L    /* 100ms */
 #define LISTEN_RETRY 40                 /* 이어받을 때 포트가 풀리길 기다리는 횟수 (50ms씩 2초) */
 #define LISTEN_RETRY_NS 50000000L
@@ -85,7 +84,7 @@ static struct thread_pool *start_pool(struct server_config *cfg)
     sigaddset(&set, SIGTERM);
     if (pthread_sigmask(SIG_BLOCK, &set, &old) != 0)
         return NULL;
-    struct thread_pool *pool = pool_create(cfg->threads, QUEUE_CAP, on_connection, cfg);
+    struct thread_pool *pool = pool_create(cfg->threads, cfg->queue, on_connection, cfg);
     pthread_sigmask(SIG_SETMASK, &old, NULL); /* 워커는 막힌 상태를 물려받았고, main만 다시 받음 */
     return pool;
 }

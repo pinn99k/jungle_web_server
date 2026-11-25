@@ -85,16 +85,35 @@ static const char *parse_route_line(struct server_config *c, char *line)
     return NULL;
 }
 
+// 고르는 방법의 이름을 읽는다. 성공 NULL, 모르는 이름이면 이유
+// 이유: 설정 파일에서 숫자 대신 이름으로 고르게 한다
+static const char *parse_balance(struct server_config *c, const char *val)
+{
+    static const char *const NAMES[] = {"rr", "even", "least"};
+    for (size_t i = 0; i < sizeof NAMES / sizeof NAMES[0]; i++) {
+        if (strcmp(val, NAMES[i]) == 0) {
+            c->balance = (int)i;
+            return NULL;
+        }
+    }
+    return "balance는 rr · even · least 중 하나";
+}
+
 // 키 하나에 값 하나를 적용한다. 성공 NULL, 실패 시 이유
 // 이유: 설정 파일과 CLI 인자가 같은 키 · 같은 범위 검사를 쓰게 한다
 static const char *apply_key(struct server_config *c, const char *key, const char *val)
 {
-    char *path = strcmp(key, "root") == 0 ? c->root
-                 : strcmp(key, "lock_file") == 0 ? c->lock_file : NULL;
-    if (path != NULL) {
-        int n = snprintf(path, CONFIG_ROOT_MAX, "%s", val);
+    const struct { const char *name; char *dst; } paths[] = {
+        {"root", c->root}, {"lock_file", c->lock_file}, {"gate_path", c->gate_path},
+    };
+    for (size_t i = 0; i < sizeof paths / sizeof paths[0]; i++) {
+        if (strcmp(key, paths[i].name) != 0)
+            continue;
+        int n = snprintf(paths[i].dst, CONFIG_ROOT_MAX, "%s", val);
         return (n < 0 || n >= CONFIG_ROOT_MAX) ? "경로가 너무 김" : NULL;
     }
+    if (strcmp(key, "balance") == 0)
+        return parse_balance(c, val);
     const struct { const char *name; long min; long max; int *dst; } keys[] = {
         {"port", 1, 65535, &c->port},
         {"threads", 1, 256, &c->threads},
@@ -104,6 +123,14 @@ static const char *apply_key(struct server_config *c, const char *key, const cha
         {"backend_timeout_ms", 1, 600000, &c->backend_timeout_ms},
         {"standby_timeout_ms", 1, 600000, &c->standby_timeout_ms},
         {"standby_fails", 1, 100, &c->standby_fails},
+        {"queue", 1, 4096, &c->queue},
+        {"eject_fails", 0, 100, &c->eject_fails},
+        {"eject_ms", 100, 600000, &c->eject_ms},
+        {"slow_start_ms", 0, 600000, &c->slow_start_ms},
+        {"retry_safe", 0, 1, &c->retry_safe},
+        {"gate_slots", 1, 1024, &c->gate_slots},
+        {"gate_grace_ms", 0, 600000, &c->gate_grace_ms},
+        {"gate_lottery", 0, 1, &c->gate_lottery},
     };
     for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++) {
         long v;
@@ -131,6 +158,10 @@ void config_defaults(struct server_config *c)
     c->backend_timeout_ms = 3000;
     c->standby_timeout_ms = 1000;
     c->standby_fails = 3;
+    c->queue = 128;
+    c->eject_ms = 10000;
+    c->gate_slots = 16;
+    c->gate_grace_ms = 3000;
     char def[] = "/ static";
     parse_route_line(c, def);
 }

@@ -23,12 +23,21 @@ async function loadCourses() {
   }
 }
 
-// 자동으로 다시 하지 않는다. 실패로 보여도 백엔드는 처리했을 수 있어서, 다시 누를지는 사람이 정한다
+// 줄을 서는 중이면 서버가 준 번호표(쿠키)로 기다린다. 다시 눌러도 순서는 그대로다
 $("apply").addEventListener("click", async () => {
   const id = $("student").value;
   try {
-    const r = await fetch("/api/apply", { method: "POST", body: "student=" + id });
-    log(r.ok ? "학번 " + id + " 신청됨 (백엔드 " + (await r.json()).port + ")" : "실패 " + r.status);
+    for (;;) {
+      const r = await fetch("/api/apply", { method: "POST", body: "student=" + id });
+      const body = r.headers.get("Content-Type") === "application/json" ? await r.json() : {};
+      if (r.status === 503 && "ahead" in body) {
+        log("내 앞에 " + body.ahead + "명");
+        await new Promise((done) => setTimeout(done, 1000 * (Number(r.headers.get("Retry-After")) || 1)));
+        continue;
+      }
+      log(r.ok ? "학번 " + id + (body.already ? " 이미 신청됨" : " 신청됨 (백엔드 " + body.port + ")") : "실패 " + r.status);
+      break;
+    }
   } catch (e) {
     log("연결 끊김. 신청이 됐는지 알 수 없음");
   }

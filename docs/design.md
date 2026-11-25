@@ -109,7 +109,9 @@ mini_web_server/
 │  ├─ static_handler.c / .h  경로 변환, 경로 탐색 방어, 파일 전송
 │  ├─ mime.c / .h            확장자 → Content-Type
 │  ├─ proxy.c / .h           리버스 프록시
-│  └─ standby.c / .h         메인 · 보조 (잠금 파일, 멈춤 판단, 이어받기)
+│  ├─ standby.c / .h         메인 · 보조 (잠금 파일, 멈춤 판단, 이어받기)
+│  ├─ balance.c / .h         백엔드 고르기
+│  └─ gate.c / .h            줄 서기 (번호표)
 ├─ backend/
 │  └─ main.c                 테스트용 백엔드 (common만 사용)
 ├─ tests/
@@ -572,7 +574,10 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 | 경로 | 동작 |
 |---|---|
 | `GET /api/courses` | 10ms 뒤 과목 목록 |
+| `GET /api/stats` | 2초 뒤 통계 (무거운 요청, 스텝 11) |
 | `POST /api/apply` (본문 `student=N`) | 100ms 뒤 stderr에 `apply N`을 남기고 응답. 기록을 응답보다 먼저 남긴다 (응답이 손님에게 못 가도 처리는 된 것이므로). 본문이 잘못되면 400 |
+
+스텝 11 상황 스위치: `./build/backend <포트> <스레드> fail`(모든 요청에 바로 500) · `cold=N`(켜진 뒤 N밀리초 동안 10배 느림). `apply_mode` · `do_stats` · `now_ms`.
 
 **www/course/**: 과목 목록과 신청 버튼 화면. **tests/course.sh**: 학생들이 신청하는 동안 프록시를 고장 내고, 학생이 본 결과와 백엔드 기록을 맞춰 본다.
 
@@ -595,6 +600,30 @@ main.c: `static int open_listener(const struct server_config *cfg)` — 이어�
 의존: main → standby → config, net, conn(종료 플래그만).
 
 ---
+
+### 스텝 13. 고르기 (`server/balance.c`)
+
+목표: 백엔드 3대를 상황에 맞게 고릅니다. 켜지 않으면(`balance rr`, 나머지 0) 예전과 같습니다.
+
+| 함수 | 한 줄 설명 |
+|---|---|
+| `int balance_pick(c, route, n, tried, now)` | 정책에 따라 백엔드 번호를 고른다 |
+| `void balance_begin(route, b)` · `void balance_end(c, route, b, failed, now)` | 처리 중 개수, 이어진 실패 횟수를 센다 |
+| `static int warm_enough` · `collect` · `least_busy` · `next_after_tried` | 천천히 늘리기 · 후보 모으기 · 덜 바쁜 쪽 · 예전 방식 |
+
+설정: `balance rr|even|least`, `eject_fails`, `eject_ms`, `slow_start_ms`, `retry_safe`, `queue`. proxy는 `attempt`(한 번 보내기) · `forward`(고르고 다시 보내기) · `safe_to_retry`로 나눈다. 공유 상태: 라우트 × 백엔드의 원자적 배열 4개 (처리 중 · 실패 · 빼는 시각 · 돌아온 시각).
+
+### 스텝 14. 줄 서기 (`server/gate.c`)
+
+목표: 웹서버가 누구인지 모르는 번호표만 발급하고, 번호표 순서대로 들입니다. 세션 · 토큰은 보지 않습니다.
+
+| 함수 | 한 줄 설명 |
+|---|---|
+| `enum gate_result gate_visit(ticket, rule, now, out, ahead)` | 번호표로 줄에 선다. PASS · WAIT · BUSY · DONE |
+| `void gate_finish(ticket, ok)` | 들어갔던 일이 끝남. 성공이면 기억, 아니면 줄에서 뺌 |
+| `static int random_bytes` · `find` · `take_free` · `join` · `count_ahead` | 난수 · 찾기 · 빈 칸 · 줄 서기 · 앞사람 세기(떠난 사람 지우기) |
+
+설정: `gate_path`(없으면 끔), `gate_slots`, `gate_grace_ms`, `gate_lottery`. 공유 상태: 번호표 목록 하나와 락 하나 (순서와 개수를 함께 바꿔야 해서 원자적 변수로 안 된다). 프록시가 죽으면 줄도 사라진다. 응답: 503 + `Set-Cookie: qticket` + `Retry-After` · 처리 중 409 · 이미 성공 200.
 
 ## 8. 엣지 케이스 대응표
 

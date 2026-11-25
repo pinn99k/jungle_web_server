@@ -16,6 +16,7 @@ static const struct {
     {404, "Not Found"},
     {405, "Method Not Allowed"},
     {408, "Request Timeout"},
+    {409, "Conflict"},
     {411, "Length Required"},
     {413, "Content Too Large"},
     {414, "URI Too Long"},
