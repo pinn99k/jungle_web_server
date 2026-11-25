@@ -663,7 +663,7 @@ main.c: `static int open_listener(const struct server_config *cfg)` — 이어�
 - 번호표 = 순번 8자 + 비밀 24자. 순번으로 배열 칸을 바로 찾는다 (65,536칸).
 - 오라고 한 시각보다 `gate_grace_ms` 넘게 늦으면 떠난 것 → 새 번호표.
 - 기다리라는 답: 503 + `Set-Cookie` + `Retry-After` + `X-Wait-Ms`. 늘 `Connection: close`.
-- 설정: `gate_path /api/apply/`(끝이 `/`면 그 아래 전부, 뒤 숫자를 과목으로 봄) · `gate_chairs` · `gate_overbook`(%) · `gate_next tail|keep` · `gate_course_slots` · `gate_soldout_ms`. `gate_lottery`와 DONE 기억은 지운다.
+- 설정: `gate_path /api/apply/`(끝이 `/`면 그 아래 전부, 뒤 숫자를 과목으로 봄) · `gate_chairs` · `gate_overbook`(%) · `gate_keep 0|1`(0 = 다음 과목은 줄 끝부터) · `gate_course_slots` · `gate_soldout_ms`. `gate_lottery`와 DONE 기억은 지운다.
 
 ### 스텝 19. 학생 클라이언트 (`client/students.c`)
 

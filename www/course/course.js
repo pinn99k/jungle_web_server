@@ -32,7 +32,7 @@ $("apply").addEventListener("click", async () => {
       const body = r.headers.get("Content-Type") === "application/json" ? await r.json() : {};
       if (r.status === 503 && "ahead" in body) {
         log("내 앞에 " + body.ahead + "명");
-        await new Promise((done) => setTimeout(done, 1000 * (Number(r.headers.get("Retry-After")) || 1)));
+        await new Promise((done) => setTimeout(done, body.wait_ms || 1000));
         continue;
       }
       log(r.ok ? "학번 " + id + (body.already ? " 이미 신청됨" : " 신청됨 (백엔드 " + body.port + ")") : "실패 " + r.status);

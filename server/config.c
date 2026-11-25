@@ -139,7 +139,11 @@ static const char *apply_key(struct server_config *c, const char *key, const cha
         {"retry_safe", 0, 1, &c->retry_safe},
         {"gate_slots", 1, 1024, &c->gate_slots},
         {"gate_grace_ms", 0, 600000, &c->gate_grace_ms},
-        {"gate_lottery", 0, 1, &c->gate_lottery},
+        {"gate_chairs", 0, 256, &c->gate_chairs},
+        {"gate_overbook", 10, 1000, &c->gate_overbook},
+        {"gate_keep", 0, 1, &c->gate_keep},
+        {"gate_course_slots", 0, 1024, &c->gate_course_slots},
+        {"gate_soldout_ms", 0, 600000, &c->gate_soldout_ms},
     };
     for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++) {
         long v;
@@ -172,6 +176,8 @@ void config_defaults(struct server_config *c)
     c->eject_ms = 10000;
     c->gate_slots = 16;
     c->gate_grace_ms = 3000;
+    c->gate_chairs = 48;
+    c->gate_overbook = 150;
     char def[] = "/ static";
     parse_route_line(c, def);
 }

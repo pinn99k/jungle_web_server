@@ -139,7 +139,8 @@ static int send_json(struct request_ctx *ctx, int status, const char *extra, con
 
 // 백엔드 응답 헤더를 손님 쪽 헤더로 다시 써서 out에 만든다 (hop-by-hop은 빼고 Connection은 우리 기준). 성공 0
 // 이유: 백엔드가 보낸 "Connection: close"는 백엔드 연결 이야기라, 손님 연결의 keep-alive와는 따로 정해야 한다 (Q7)
-static int build_client_header(const struct http_message *resp, int keep, struct buf *out)
+static int build_client_header(const struct http_message *resp, int keep, const char *extra,
+                               struct buf *out)
 {
     char status[32];
     snprintf(status, sizeof status, "%d", resp->status);
@@ -150,6 +151,8 @@ static int build_client_header(const struct http_message *resp, int keep, struct
         if (!is_hop_by_hop(h->name) && add_line(out, "%s: %s\r\n", h->name, h->value) < 0)
             return -1;
     }
+    if (extra != NULL && buf_append(out, extra, strlen(extra)) < 0)
+        return -1;
     return add_line(out, "Connection: %s%s\r\n\r\n", keep ? "keep-alive" : "close", "");
 }
 
@@ -212,7 +215,7 @@ static int relay_response(int bfd, struct request_ctx *ctx)
     long cl = body_length(ctx->msg, &p.msg);
     int keep = ctx->keep_alive && cl >= 0; /* 길이를 모르면 손님 연결도 닫아야 끝을 알린다 (Q8) */
     size_t body = body_room(cl, 0, in.len - p.msg.header_len);
-    int ok = build_client_header(&p.msg, keep, &head) == 0
+    int ok = build_client_header(&p.msg, keep, ctx->extra, &head) == 0
              && net_write_all(ctx->fd, head.data, head.len) == 0
              && net_write_all(ctx->fd, in.data + p.msg.header_len, body) == 0;
     ctx->status = p.msg.status;
@@ -282,7 +285,7 @@ static int forward(struct request_ctx *ctx, const struct buf *req)
 {
     int route = (int)(ctx->route - ctx->cfg->routes);
     int n = ctx->route->backend_count;
-    int status = 502;
+    int status = 503;                   /* 한 번도 못 보냈으면 자리가 다 찬 것 */
     unsigned tried = 0;
     for (int t = 0; t < (n > 1 ? 2 : 1); t++) {
         int sent;
@@ -298,7 +301,9 @@ static int forward(struct request_ctx *ctx, const struct buf *req)
         if (!safe_to_retry(ctx, sent))
             break;
     }
-    // 한 번도 못 보냈으면 서버가 아픈 게 아니라 자리가 다 찬 것이다
+    // 줄을 서서 들어왔다가 실패한 손님은 번호표를 돌려받아야 순번을 지킨다
+    if (ctx->extra != NULL)
+        return send_json(ctx, status, ctx->extra, "{\"failed\":true}\n");
     return tried == 0 ? send_json(ctx, 503, "Retry-After: 1\r\n", "{\"busy\":true}\n")
                       : send_error(ctx, status);
 }
@@ -316,64 +321,109 @@ static int ticket_of(const struct request_ctx *ctx, char out[GATE_TICKET_LEN + 1
     return 1;
 }
 
-// 줄을 세우는 경로의 POST 요청이면 1
+// 줄을 세우는 경로의 POST 요청이면 1. gate_path 끝이 /면 그 아래 경로 전부
 // 이유: 줄 서기를 켜지 않으면(gate_path 없음) 예전과 똑같이 동작한다
 static int gated(const struct request_ctx *ctx)
 {
     const char *path = ctx->cfg->gate_path;
-    size_t n = strcspn(ctx->msg->target, "?");
-    return path[0] != '\0' && strcmp(ctx->msg->method, "POST") == 0 && strlen(path) == n
-           && strncmp(ctx->msg->target, path, n) == 0;
+    size_t len = strlen(path);
+    if (len == 0 || strcmp(ctx->msg->method, "POST") != 0
+        || strncmp(ctx->msg->target, path, len) != 0)
+        return 0;
+    return path[len - 1] == '/' || strcspn(ctx->msg->target, "?") == len;
 }
 
-// 번호표 순서에 따라 들이거나 기다리게 한다. 들어가도 되면 1(번호표는 ticket에), 이미 답했으면 0
-// 이유: 기다리는 손님에게 연결 · 워커를 쓰지 않고 바로 답해, 줄이 길어도 서버가 막히지 않는다
-static int pass_gate(struct request_ctx *ctx, char ticket[GATE_TICKET_LEN + 1], int *rc)
+// 줄 세우는 경로 뒤의 과목 번호를 반환한다. 없으면 -1
+// 이유: 과목별 자리와 마감 기억은 "어느 과목인가"만 있으면 된다. 누구인지는 보지 않는다
+static int course_of(const struct request_ctx *ctx)
+{
+    const char *p = ctx->msg->target + strlen(ctx->cfg->gate_path);
+    return isdigit((unsigned char)*p) ? (int)strtol(p, NULL, 10) : -1;
+}
+
+// 지금 설정과 멀쩡한 서버 수로 줄의 규칙을 채운다
+// 이유: 서버가 죽으면 들이는 수도 그만큼 줄어야 한다
+static struct gate_rule gate_rule_of(const struct request_ctx *ctx)
 {
     const struct server_config *c = ctx->cfg;
-    struct gate_rule rule = {c->gate_slots, c->gate_grace_ms, c->gate_lottery};
+    int up = balance_capacity(c, (int)(ctx->route - c->routes), balance_now());
+    struct gate_rule r = {
+        .slots = up > 0 ? up : c->gate_slots, .chairs = c->gate_chairs,
+        .overbook = c->gate_overbook, .grace_ms = c->gate_grace_ms, .keep = c->gate_keep,
+        .course_slots = c->gate_course_slots, .soldout_ms = c->gate_soldout_ms,
+    };
+    return r;
+}
+
+// 번호표 헤더 줄을 extra에 적는다
+// 이유: 들어간 응답과 기다리라는 응답이 같은 쿠키를 쓴다
+static void cookie_line(char *extra, size_t n, const char *ticket)
+{
+    snprintf(extra, n, "Set-Cookie: qticket=%s; Path=/; HttpOnly; SameSite=Lax\r\n", ticket);
+}
+
+// 줄에 세운다. 들어가도 되면 1, 이미 답했으면(기다림 · 처리 중 · 마감) 0
+// 이유: 기다리는 손님에게 연결 · 워커를 쓰지 않고 바로 답해, 줄이 길어도 서버가 막히지 않는다
+static int pass_gate(struct request_ctx *ctx, const struct gate_rule *rule, struct gate_pass *pass)
+{
     char mine[GATE_TICKET_LEN + 1];
-    char extra[160];
+    char extra[256] = "";
     char body[64];
-    int ahead;
     const char *key = ticket_of(ctx, mine) ? mine : NULL;
-    switch (gate_visit(key, &rule, balance_now(), ticket, &ahead)) {
-    case GATE_PASS:
+    enum gate_result r = gate_enter(key, course_of(ctx), rule, balance_now(), pass);
+    if (r == GATE_PASS)
         return 1;
-    case GATE_BUSY:
-        *rc = send_json(ctx, 409, "Retry-After: 1\r\n", "{\"running\":true}\n");
-        return 0;
-    case GATE_DONE:
-        *rc = send_json(ctx, 200, NULL, "{\"already\":true}\n");
-        return 0;
-    default:
-        snprintf(extra, sizeof extra, "Set-Cookie: qticket=%s; Path=/; HttpOnly; SameSite=Lax\r\n"
-                 "Retry-After: 1\r\n", ticket);
-        snprintf(body, sizeof body, "{\"ahead\":%d}\n", ahead);
-        *rc = send_json(ctx, 503, ticket[0] ? extra : "Retry-After: 1\r\n", body);
-        return 0;
+    ctx->keep_alive = 0;
+    if (r == GATE_FULL) {
+        send_json(ctx, 409, NULL, "{\"full\":true,\"remembered\":true}\n");
+    } else if (r == GATE_BUSY) {
+        send_json(ctx, 409, "Retry-After: 1\r\n", "{\"running\":true}\n");
+    } else {
+        if (pass->ticket[0] != '\0')
+            cookie_line(extra, sizeof extra, pass->ticket);
+        size_t n = strlen(extra);
+        snprintf(extra + n, sizeof extra - n, "Retry-After: %d\r\nX-Wait-Ms: %d\r\n",
+                 (pass->wait_ms + 999) / 1000, pass->wait_ms);
+        snprintf(body, sizeof body, "{\"ahead\":%d,\"wait_ms\":%d}\n", pass->ahead, pass->wait_ms);
+        send_json(ctx, 503, extra, body);
     }
+    return 0;
+}
+
+// 줄을 통과한 요청을 전달하고 자리를 돌려준다. 0 계속, -1 닫기
+// 이유: 걸린 시간과 답을 줄에 알려야 부르는 속도와 마감 기억이 맞는다
+static int forward_gated(struct request_ctx *ctx, const struct buf *req)
+{
+    char extra[160];
+    struct gate_pass pass;
+    struct gate_rule rule = gate_rule_of(ctx);
+    if (!pass_gate(ctx, &rule, &pass))
+        return -1;
+    long start = balance_now();
+    if (pass.fresh) {
+        cookie_line(extra, sizeof extra, pass.ticket);
+        ctx->extra = extra;
+    }
+    int rc = forward(ctx, req);
+    ctx->extra = NULL;
+    long end = balance_now();
+    gate_leave(&pass, &rule, ctx->status, (int)(end - start), end);
+    return rc;
 }
 
 // 프록시 핸들러: 줄 서기 → 백엔드 선택 → 전달 → 응답 중계. 0 계속, -1 닫기
 // 이유: 라우터가 /api/처럼 프록시 라우트로 고른 요청을 백엔드와 손님 사이에서 대신 전달한다
 int proxy_handle(struct request_ctx *ctx)
 {
-    char ticket[GATE_TICKET_LEN + 1] = "";
     struct buf req;
-    int rc = -1;
-    int through = gated(ctx);
+    int rc;
     if (proxy_path_escapes(ctx->msg->target))
         return send_error(ctx, 400);
-    if (through && !pass_gate(ctx, ticket, &rc))
-        return rc;
     buf_init(&req);
     if (build_upstream_request(ctx, &req) < 0)
         rc = send_error(ctx, 502);
     else
-        rc = forward(ctx, &req);
+        rc = gated(ctx) ? forward_gated(ctx, &req) : forward(ctx, &req);
     buf_free(&req);
-    if (through)
-        gate_finish(ticket, ctx->status == 200);
     return rc;
 }
