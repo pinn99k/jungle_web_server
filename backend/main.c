@@ -32,6 +32,10 @@ static int fail_mode;                   /* 1이면 모든 요청에 바로 500 *
 static long cold_until_ms;              /* 이 시각까지 모든 일이 COLD_FACTOR배 느림 */
 static struct ledger *ledger;           /* 좌석 장부. 없으면 과목 신청을 받지 않음 */
 static int lock_ms = 5;                 /* 과목 잠금을 쥐고 있는 시간 */
+static int db_free;                     /* 남은 DB 연결 수 (db_limit이 0이면 안 씀) */
+static int db_limit;
+static pthread_mutex_t db_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t db_returned = PTHREAD_COND_INITIALIZER;
 
 // 헤더와 본문을 조립해 보낸다 (항상 Connection: close)
 // 이유: 프록시가 요청마다 새 연결을 쓰고 Connection: close로 보내므로, 응답 하나 뒤 닫는 게 약속이다
@@ -207,6 +211,21 @@ static void do_apply(int fd, int port, const struct http_message *m, const char 
     respond(fd, 200, "application/json", body, (size_t)n);
 }
 
+// DB 연결을 하나 빌린다(delta -1) 또는 돌려준다(+1). 남은 것이 없으면 돌아올 때까지 기다린다
+// 이유: 실제 백엔드도 DB 연결 수만큼만 동시에 일한다. 더 보내면 스레드를 쥔 채 안에서 기다린다
+static void db_take(int delta)
+{
+    if (db_limit == 0)
+        return;
+    pthread_mutex_lock(&db_lock);
+    while (delta < 0 && db_free == 0)
+        pthread_cond_wait(&db_returned, &db_lock);
+    db_free += delta;
+    if (delta > 0)
+        pthread_cond_signal(&db_returned);
+    pthread_mutex_unlock(&db_lock);
+}
+
 // "/api/apply/<과목>"에 신청한다. 45~95ms 일한 뒤 장부에 적는다. 된 것 200 · 마감 409 · 시작 전 403 · 잘못 400
 // 이유: 실제 신청처럼 과목마다 정원이 있고, 같은 과목은 한 명씩 처리된다
 static void do_course_apply(int fd, int port, const struct http_message *m, const char *raw)
@@ -227,8 +246,10 @@ static void do_course_apply(int fd, int port, const struct http_message *m, cons
     if (!ledger_closed(ledger)) {
         if (seed == 0)
             seed = (unsigned)(now_ms() ^ (long)pthread_self());
+        db_take(-1);
         wait_ms(45 + (int)(rand_r(&seed) % 51));
         r = ledger_apply(ledger, (int)course, (int)id, lock_ms);
+        db_take(1);
     }
     int n = snprintf(body, sizeof body, "%s\"port\":%d}\n", BODY[r], port);
     respond(fd, STATUS[r], "application/json", body, (size_t)n);
@@ -326,7 +347,7 @@ static long parse_arg(const char *s, long max)
     return (end == s || *end != '\0' || v < 1 || v > max) ? -1 : v;
 }
 
-// 상황 인자를 스위치에 적용한다: "fail" · "cold=밀리초" · "ledger=파일" · "lock=밀리초". 성공 0, 모르는 인자 -1
+// 상황 인자를 스위치에 적용한다: "fail" · "cold=밀리초" · "ledger=파일" · "lock=밀리초" · "db=연결 수". 성공 0, 모르는 인자 -1
 // 이유: 업데이트 실수(바로 500)와 막 켜진 서버(잠깐 느림)를 코드 수정 없이 만든다
 static int apply_mode(const char *mode)
 {
@@ -336,6 +357,8 @@ static int apply_mode(const char *mode)
     }
     if (strncmp(mode, "ledger=", 7) == 0)
         return (ledger = ledger_open(mode + 7)) != NULL ? 0 : -1;
+    if (strncmp(mode, "db=", 3) == 0)
+        return (db_limit = db_free = (int)parse_arg(mode + 3, 1000)) > 0 ? 0 : -1;
     if (strncmp(mode, "lock=", 5) == 0)
         return (lock_ms = (int)parse_arg(mode + 5, 1000)) > 0 ? 0 : -1;
     if (strncmp(mode, "cold=", 5) != 0)
@@ -357,7 +380,7 @@ int main(int argc, char **argv)
     for (int i = 3; i < argc && !bad; i++)
         bad = apply_mode(argv[i]) < 0;
     if (bad) {
-        fprintf(stderr, "사용법: %s <포트> [처리 스레드 수 1~%d] [fail|cold=ms|ledger=파일|lock=ms]...\n",
+        fprintf(stderr, "사용법: %s <포트> [처리 스레드 수 1~%d] [fail|cold=ms|ledger=파일|lock=ms|db=N]...\n",
                 argv[0], MAX_THREADS);
         return 1;
     }

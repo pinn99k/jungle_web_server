@@ -33,7 +33,7 @@ ASAN_TESTS      := $(TEST_SRC:tests/%.c=$(BUILD)/asan/tests/%)
 # 테스트 .o를 중간 파일로 보고 지우면 매번 다시 컴파일하므로 남겨 둔다
 .SECONDARY:
 
-all: $(BUILD)/server $(BUILD)/backend $(BUILD)/ledger
+all: $(BUILD)/server $(BUILD)/backend $(BUILD)/ledger $(BUILD)/students
 
 $(BUILD)/server: $(SERVER_OBJ)
 	$(CC) $(LDFLAGS) -o $@ $^
@@ -42,6 +42,10 @@ $(BUILD)/backend: $(BACKEND_OBJ)
 	$(CC) $(LDFLAGS) -o $@ $^
 
 $(BUILD)/ledger: $(BUILD)/obj/backend/ledger_tool.o $(BUILD)/obj/backend/ledger.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
+# 측정용 학생 클라이언트 (ADR 0002 예외). 서버 코드를 링크하지 않는다
+$(BUILD)/students: $(BUILD)/obj/client/students.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
 $(BUILD)/tests/%: $(BUILD)/obj/tests/%.o $(COMMON_OBJ)
