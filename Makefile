@@ -12,7 +12,7 @@ BUILD      := build
 COMMON_SRC := common/buf.c common/net.c common/http_parser.c common/http_response.c
 # main을 뺀 server 모듈. 테스트도 이것과 함께 링크한다
 LIB_SRC    := $(COMMON_SRC) server/mime.c server/static_handler.c server/config.c server/router.c \
-              server/proxy.c server/thread_pool.c server/conn.c
+              server/proxy.c server/thread_pool.c server/conn.c server/standby.c
 SERVER_SRC := server/main.c $(LIB_SRC)
 # 백엔드는 common/만 쓴다 (server/ 모듈을 링크하지 않음)
 BACKEND_SRC := backend/main.c $(COMMON_SRC)

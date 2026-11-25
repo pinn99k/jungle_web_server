@@ -33,6 +33,9 @@ struct server_config {
     int request_deadline_ms;
     int backend_connect_timeout_ms;
     int backend_timeout_ms;
+    char lock_file[CONFIG_ROOT_MAX];    /* 메인 · 보조 잠금 파일. 빈 문자열이면 이중화 안 함 */
+    int standby_timeout_ms;             /* 보조가 메인의 응답을 기다리는 시간 */
+    int standby_fails;                  /* 연속으로 이만큼 답이 없으면 이어받음 */
     struct route routes[CONFIG_MAX_ROUTES];
     int route_count;
 };

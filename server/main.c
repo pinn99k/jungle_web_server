@@ -15,11 +15,14 @@
 #include "common/net.h"
 #include "server/config.h"
 #include "server/conn.h"
+#include "server/standby.h"
 #include "server/thread_pool.h"
 
 #define LISTEN_BACKLOG 128
 #define QUEUE_CAP 128                   /* 작업 큐 크기 (5장 기본값) */
 #define EMFILE_BACKOFF_NS 100000000L    /* 100ms */
+#define LISTEN_RETRY 40                 /* 이어받을 때 포트가 풀리길 기다리는 횟수 (50ms씩 2초) */
+#define LISTEN_RETRY_NS 50000000L
 
 // 워커가 실행하는 작업: 연결 하나를 처음부터 끝까지 처리한다
 // 이유: 스레드 풀은 무엇을 하는지 모르고 이 함수만 부른다. 연결의 수명은 conn이 책임진다
@@ -93,6 +96,7 @@ static void accept_loop(int lfd, struct thread_pool *pool)
 {
     while (!atomic_load(&conn_stopping)) {
         char ip[INET_ADDRSTRLEN];
+        // 빈 곳을 찾아서 연결함
         int cfd = net_accept(lfd, ip, sizeof ip);
         if (cfd >= 0) {
             if (pool_submit(pool, cfd, ip) < 0)
@@ -111,6 +115,20 @@ static void accept_loop(int lfd, struct thread_pool *pool)
     }
 }
 
+// 리스닝 소켓을 연다. 이중화 중이면 포트가 풀릴 때까지 잠깐 다시 시도한다. 성공 fd, 실패 -1
+// 이유: 메인이 끝날 때 커널은 잠금과 포트를 같은 순간에 풀지 않는다. 그 틈에 실패했다고 끝나면 이어받을 쪽이 없다
+static int open_listener(const struct server_config *cfg)
+{
+    int tries = cfg->lock_file[0] != '\0' ? LISTEN_RETRY : 0;
+    int lfd = net_listen((uint16_t)cfg->port, LISTEN_BACKLOG);
+    while (lfd < 0 && errno == EADDRINUSE && tries-- > 0) {
+        struct timespec ts = {0, LISTEN_RETRY_NS};
+        nanosleep(&ts, NULL);
+        lfd = net_listen((uint16_t)cfg->port, LISTEN_BACKLOG);
+    }
+    return lfd;
+}
+
 // 설정 → 시그널 → 리스닝 → 스레드 풀 → accept 루프 → 종료 정리
 // 이유: 종료는 "새 연결 막기 → 리스닝 닫기 → 진행 중 · 대기 중 요청 마무리 → 워커 회수" 순서여야 요청이 잘리지 않는다
 int main(int argc, char **argv)
@@ -119,6 +137,7 @@ int main(int argc, char **argv)
     char err[512];
     struct stat st;
     config_defaults(&cfg);
+    // 설정파일 읽기 8080번, www/, 라우트 /api/ → 8001·8002, / → 정적
     if (config_apply_args(&cfg, argc, argv, err, sizeof err) < 0) {
         fprintf(stderr, "설정 오류: %s\n사용법: %s [-c 설정파일] [-p 포트] [-r 루트] [-t 스레드수]\n",
                 err, argv[0]);
@@ -132,11 +151,22 @@ int main(int argc, char **argv)
         perror("sigaction");
         return 1;
     }
-    int lfd = net_listen((uint16_t)cfg.port, LISTEN_BACKLOG);
+    // 이중화를 켰으면 메인이 될 때까지 여기서 기다린다. 잠금은 프로세스가 끝날 때 커널이 푼다 (ADR 0003)
+    if (cfg.lock_file[0] != '\0') {
+        int lock = standby_acquire(&cfg);
+        if (lock < 0) {
+            if (lock == -1)
+                perror("lock_file");
+            return lock == -1;
+        }
+    }
+    // 커널 시작
+    int lfd = open_listener(&cfg);
     if (lfd < 0) {
         perror("listen");
         return 1;
     }
+    // 풀 만들기
     struct thread_pool *pool = start_pool(&cfg);
     if (pool == NULL) {
         fprintf(stderr, "스레드 풀을 만들 수 없음\n");
@@ -146,6 +176,7 @@ int main(int argc, char **argv)
     fprintf(stderr, "포트 %d에서 대기 중 (루트 %s, 라우트 %d개, 워커 %d)\n", cfg.port, cfg.root,
             cfg.route_count, cfg.threads);
 
+    // 연결 루프 시작 
     accept_loop(lfd, pool);
     fprintf(stderr, "종료 중: 새 연결을 받지 않고 진행 중인 요청을 마무리합니다\n");
     close(lfd);

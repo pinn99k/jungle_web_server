@@ -1,8 +1,10 @@
 #include "server/proxy.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
@@ -31,6 +33,47 @@ static int is_hop_by_hop(const char *name)
             return 1;
     }
     return 0;
+}
+
+// *p의 글자 하나를 %XX면 풀어서 반환하고 *p를 다음 글자로 옮긴다
+// 이유: 백엔드는 %2e를 .으로, %2f를 /로 읽을 수 있으므로 풀린 글자로 검사해야 한다
+static char next_char(const char **p, const char *end)
+{
+    const char *s = *p;
+    if (*s == '%' && end - s >= 3 && isxdigit((unsigned char)s[1])
+        && isxdigit((unsigned char)s[2])) {
+        char hex[3] = {s[1], s[2], '\0'};
+        *p = s + 3;
+        return (char)strtol(hex, NULL, 16);
+    }
+    *p = s + 1;
+    return *s;
+}
+
+// 요청 경로에 상위로 올라가는 .. 조각이 있으면 1. 조각의 ; 뒤는 무시하고 \도 구분자로 본다
+// 이유: 우리는 정리 전 경로로 라우트를 고르므로, 백엔드가 ..을 정리하면 공개하지 않은 경로에 닿는다
+int proxy_path_escapes(const char *target)
+{
+    const char *end = target + strcspn(target, "?");
+    char seg[2] = {0, 0};
+    size_t len = 0;
+    int params = 0;
+    for (const char *p = target; p < end;) {
+        char c = next_char(&p, end);
+        if (c == '/' || c == '\\') {
+            if (len == 2 && seg[0] == '.' && seg[1] == '.')
+                return 1;
+            len = 0;
+            params = 0;
+        } else if (c == ';') {
+            params = 1;
+        } else if (!params) {
+            if (len < sizeof seg)
+                seg[len] = c;
+            len++;
+        }
+    }
+    return len == 2 && seg[0] == '.' && seg[1] == '.';
 }
 
 // 이 라우트의 카운터를 원자적으로 1 올려 다음 백엔드 번호를 고른다
@@ -142,6 +185,25 @@ static int read_response_head(int bfd, struct http_parser *p, struct buf *in)
     }
 }
 
+// 이 응답에 올 본문 길이를 반환한다. 본문이 없는 응답이면 0, 길이를 모르면 -1
+// 이유: HEAD · 204 · 304는 Content-Length가 있어도 본문이 오지 않으므로, 기다리거나 넘기면 안 된다
+static long body_length(const struct http_message *req, const struct http_message *resp)
+{
+    if (strcmp(req->method, "HEAD") == 0 || resp->status == 204 || resp->status == 304)
+        return 0;
+    return resp->content_length;
+}
+
+// done바이트를 보낸 뒤 손님에게 더 보내도 되는 바이트 수를 max 이하로 반환한다 (길이를 모르면 max)
+// 이유: 백엔드가 약속한 길이보다 많이 보내도 넘기지 않아야 손님 쪽 다음 응답의 경계가 어긋나지 않는다
+static size_t body_room(long cl, size_t done, size_t max)
+{
+    if (cl < 0)
+        return max;
+    size_t left = (size_t)cl > done ? (size_t)cl - done : 0;
+    return left < max ? left : max;
+}
+
 // 백엔드 응답을 읽어 손님에게 그대로 흘려보낸다. 0 = 손님 연결 계속 가능, -1 = 닫아야 함
 // 이유: 응답을 통째로 모으지 않고 받는 대로 보내, 큰 응답도 연결마다 16KB만 쓰게 한다
 static int relay_response(int bfd, struct request_ctx *ctx)
@@ -157,16 +219,16 @@ static int relay_response(int bfd, struct request_ctx *ctx)
         buf_free(&in);
         return send_error(ctx, rc) == 0 ? 0 : -1;
     }
-    long cl = p.msg.content_length;
+    long cl = body_length(ctx->msg, &p.msg);
     int keep = ctx->keep_alive && cl >= 0; /* 길이를 모르면 손님 연결도 닫아야 끝을 알린다 (Q8) */
-    size_t body = in.len - p.msg.header_len;
+    size_t body = body_room(cl, 0, in.len - p.msg.header_len);
     int ok = build_client_header(&p.msg, keep, &head) == 0
              && net_write_all(ctx->fd, head.data, head.len) == 0
              && net_write_all(ctx->fd, in.data + p.msg.header_len, body) == 0;
     ctx->status = p.msg.status;
     char chunk[UPSTREAM_CHUNK];
     while (ok && (cl < 0 || (long)body < cl)) {
-        ssize_t r = net_read(bfd, chunk, sizeof chunk);
+        ssize_t r = net_read(bfd, chunk, body_room(cl, body, sizeof chunk));
         if (r <= 0) {
             ok = cl < 0 && r == 0; /* 길이 없는 본문은 백엔드가 닫으면 끝. 그 외는 중간에 끊김 (Q9) */
             break;
@@ -184,6 +246,8 @@ static int relay_response(int bfd, struct request_ctx *ctx)
 // 이유: 라우터가 /api/처럼 프록시 라우트로 고른 요청을 백엔드와 손님 사이에서 대신 전달한다
 int proxy_handle(struct request_ctx *ctx)
 {
+    if (proxy_path_escapes(ctx->msg->target))
+        return send_error(ctx, 400);
     int bfd = connect_backend(ctx);
     if (bfd < 0)
         return send_error(ctx, 502);

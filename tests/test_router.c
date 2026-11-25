@@ -109,6 +109,21 @@ static void test_args_override(void)
     unlink(path);
 }
 
+// 메인 · 보조 설정 키를 읽고, 없으면 이중화를 끈 기본값인지 본다
+// 이유: lock_file이 없을 때 예전과 똑같이 동작해야 한다 (ADR 0003)
+static void test_standby_keys(void)
+{
+    CHECK_INT(load("port 8080\n"), 0);
+    CHECK_STR(C.lock_file, "");
+    CHECK_INT(C.standby_fails, 3);
+    CHECK_INT(load("lock_file /tmp/x.lock\nstandby_timeout_ms 250\nstandby_fails 2\n"), 0);
+    CHECK_STR(C.lock_file, "/tmp/x.lock");
+    CHECK_INT(C.standby_timeout_ms, 250);
+    CHECK_INT(C.standby_fails, 2);
+    CHECK_INT(load("standby_fails 0\n"), -1);
+    CHECK_INT(load("lock_file\n"), -1);
+}
+
 // 모든 테스트를 실행하고, 하나라도 실패하면 종료 코드 1을 반환한다
 // 이유: make test가 종료 코드로 성공 · 실패를 판단한다
 int main(void)
@@ -118,5 +133,6 @@ int main(void)
     RUN(test_no_match_and_default);
     RUN(test_config_errors);
     RUN(test_args_override);
+    RUN(test_standby_keys);
     return TEST_EXIT();
 }

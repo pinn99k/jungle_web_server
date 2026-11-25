@@ -223,6 +223,7 @@ int static_handle(struct request_ctx *ctx)
              && (head || send_file_body(ctx->fd, fd, size) == 0);
     ctx->bytes = ok && !head ? (size_t)size : 0;
     buf_free(&out);
+    // 파일을 한 곳 에서만 닫음
     close(fd);
     return ok ? 0 : -1;
 }

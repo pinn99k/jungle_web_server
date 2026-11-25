@@ -91,7 +91,8 @@ mini_web_server/
 ├─ CLAUDE.md                 Claude Code 작업 규칙
 ├─ Makefile                  server, backend, tests 빌드
 ├─ conf/
-│  └─ server.conf            포트, 문서 루트, 스레드 수, 타임아웃, 라우팅 규칙
+│  ├─ server.conf            포트, 문서 루트, 스레드 수, 타임아웃, 라우팅 규칙
+│  └─ course.conf            수강신청 시나리오 (백엔드 3대, 메인 · 보조)
 ├─ www/                      정적 파일 루트 (테스트용 html, css, js, png, jpg)
 ├─ common/                   server와 backend가 함께 쓰는 모듈
 │  ├─ buf.c / .h             크기가 늘어나는 바이트 버퍼
@@ -107,7 +108,8 @@ mini_web_server/
 │  ├─ router.c / .h          경로 → 라우트 + 핸들러
 │  ├─ static_handler.c / .h  경로 변환, 경로 탐색 방어, 파일 전송
 │  ├─ mime.c / .h            확장자 → Content-Type
-│  └─ proxy.c / .h           리버스 프록시
+│  ├─ proxy.c / .h           리버스 프록시
+│  └─ standby.c / .h         메인 · 보조 (잠금 파일, 멈춤 판단, 이어받기)
 ├─ backend/
 │  └─ main.c                 테스트용 백엔드 (common만 사용)
 ├─ tests/
@@ -236,6 +238,8 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 | 6 | `backend/` | ~150 |
 | 7 | `proxy` | ~250 |
 | 8 | 시그널 종료, 엣지 케이스, 기능·부하 테스트 | ~200 |
+| 9 | 수강신청 시나리오 (백엔드 3대) | ~150 |
+| 10 | 메인 · 보조 (`standby`) | ~180 |
 
 ### 페이즈
 
@@ -480,7 +484,17 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 | `GET /api/time` | `{"port":8001,"time":"..."}`. 응답에 자기 포트를 넣어 Round-Robin을 눈으로 확인 |
 | `POST /api/echo` | 받은 본문을 그대로 돌려줌 |
 | `GET /api/slow` | 5초 기다린 뒤 응답 (504 테스트용) |
+| `GET /api/work?ms=N` | N밀리초(0~10000) 기다린 뒤 응답. N이 없거나 범위 밖이면 400 (측정용, 2026-11-25) |
 | 그 외 | 404 |
+
+측정용 추가 (2026-11-25 핑구 승인, 상황별 성능 측정): `./build/backend <포트> [처리 스레드 수]`. 기본 1이면 예전과 같은 단일 스레드. N이면 스레드 N개가 같은 리스닝 소켓에서 각자 accept해 동시에 N건을 처리한다 (실무 백엔드처럼 동시 처리 수를 정하기 위해). 기다림은 sleep이라 CPU를 쓰지 않는다 (DB 대기 흉내).
+
+| 함수 | 한 줄 설명 |
+|---|---|
+| `static int work_ms(const char *target)` | `/api/work?ms=N`의 N. 없거나 범위 밖이면 -1 |
+| `static void respond_work(int fd, int port, const char *target)` | N밀리초 기다린 뒤 `{"port":..,"ms":N}` 응답, 잘못된 N이면 400 |
+| `static void *serve_loop(void *arg)` | 리스닝 소켓에서 연결을 하나씩 받아 처리하는 것을 반복한다 |
+| `static long parse_arg(const char *s, long max)` | 인자를 1~max 정수로 바꾼다. 아니면 -1 |
 
 **common/net.h에 추가**: 없음 (스텝 1의 함수로 충분).
 
@@ -510,7 +524,7 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 | `static int read_response_head` · `static int build_client_header` · `static int send_error` · `static int add_line` | 백엔드 응답 헤더까지 읽기(첫 바이트 전 시간 초과 504) · 손님 쪽 헤더 다시 쓰기 · 502/504 응답 · 잘림 검사 붙은 한 줄 추가 | 내부 (구현 중 추가) |
 | `static int connect_with_timeout` (net.c) | 논블로킹 connect + poll로 1초 제한 | 내부 (구현 중 추가) |
 
-구현에서 정한 것 (Q5 지도): 경로 · Host 그대로 (Q1 · Q2), Round-Robin 카운터는 `proxy.c`의 `static atomic_uint rr_counters[]`, 칸 번호는 `route - cfg->routes` (Q4). 응답은 헤더까지 받은 뒤 손님 쪽 헤더를 다시 만들어 보내고 본문은 받는 대로 흘려보낸다. 백엔드 응답에 Content-Length가 없으면 손님 연결도 닫는다 (Q8). 핸들러는 `ctx->status` · `ctx->bytes` · `ctx->upstream`을 채우고, conn이 접근 로그 한 줄을 남긴다 (Q3).
+구현에서 정한 것 (Q5 지도): 경로 · Host 그대로 (Q1 · Q2), Round-Robin 카운터는 `proxy.c`의 `static atomic_uint rr_counters[]`, 칸 번호는 `route - cfg->routes` (Q4). 응답은 헤더까지 받은 뒤 손님 쪽 헤더를 다시 만들어 보내고 본문은 받는 대로 흘려보낸다. HEAD · 204 · 304는 본문이 없는 응답이고, 길이를 알면 그 길이까지만 보낸다 (2026-11-25). 백엔드 응답에 Content-Length가 없으면 손님 연결도 닫는다 (Q8). 핸들러는 `ctx->status` · `ctx->bytes` · `ctx->upstream`을 채우고, conn이 접근 로그 한 줄을 남긴다 (Q3).
 
 **완료 확인**
 - 백엔드 2개 실행 후 `for i in 1 2 3 4; do curl -s localhost:8080/api/time; done` → 포트가 8001, 8002 번갈아 나옴
@@ -542,6 +556,44 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 - 응답 도중 클라이언트가 끊어도 서버가 죽지 않음
 - `wrk -t4 -c100 -d10s http://127.0.0.1:8080/index.html` 결과 기록 (스레드 수 4 / 8 / 16 비교)
 
+
+### 스텝 9. 수강신청 시나리오 (백엔드 3대)
+
+목표: 리버스 프록시를 둔 이유(여러 백엔드, 한 대가 고장 나도 계속)가 드러나는 서비스를 만듭니다. 2026-11-25 핑구 결정. `conf/course.conf`가 백엔드 3대로 나눕니다.
+
+**backend/main.c** (경로가 여섯 개가 되어 표로 고른다)
+
+| 함수 | 한 줄 설명 |
+|---|---|
+| `static void do_time · do_echo · do_slow · do_work · do_courses · do_apply (int fd, int port, const struct http_message *m, const char *raw)` | 경로 하나의 동작. 모두 같은 모양 |
+| `static void wait_ms(int ms)` | CPU를 쓰지 않고 기다린다 |
+| `static long student_id(const char *body, size_t len)` | 본문 `student=N`의 N. 아니면 -1 |
+
+| 경로 | 동작 |
+|---|---|
+| `GET /api/courses` | 10ms 뒤 과목 목록 |
+| `POST /api/apply` (본문 `student=N`) | 100ms 뒤 stderr에 `apply N`을 남기고 응답. 기록을 응답보다 먼저 남긴다 (응답이 손님에게 못 가도 처리는 된 것이므로). 본문이 잘못되면 400 |
+
+**www/course/**: 과목 목록과 신청 버튼 화면. **tests/course.sh**: 학생들이 신청하는 동안 프록시를 고장 내고, 학생이 본 결과와 백엔드 기록을 맞춰 본다.
+
+### 스텝 10. 메인 · 보조 (ADR 0003)
+
+목표: 프록시가 죽거나 멈추면 보조가 이어받습니다. 질문 지도 Q7.
+
+**server/standby.c / .h**
+
+| 함수 | 한 줄 설명 | 호출하는 곳 |
+|---|---|---|
+| `int standby_acquire(const struct server_config *c)` | 메인이 될 때까지 기다린다. 메인이 되면 잠금 fd, 종료 신호면 -2, 실패 -1 | main |
+| `static int try_lock(int fd)` | 잠금을 시도한다. 얻으면 1, 남이 쥐고 있으면 0, 오류 -1 | 내부 |
+| `static int main_answers(const struct server_config *c)` | 메인에게 `GET /`를 보내 제한 시간 안에 1바이트라도 오면 1 | 내부 |
+| `static void fence_main(int fd)` | 잠금을 쥔 프로세스를 SIGKILL로 끝낸다 | 내부 |
+
+main.c: `static int open_listener(const struct server_config *cfg)` — 이어받을 때 포트가 풀릴 때까지 최대 2초 다시 시도 (2026-11-25, 이어받기 실패 1/6 관찰).
+
+설정 키: `lock_file`(없으면 이중화 안 함), `standby_timeout_ms`(기본 1000), `standby_fails`(기본 3).
+의존: main → standby → config, net, conn(종료 플래그만).
+
 ---
 
 ## 8. 엣지 케이스 대응표
@@ -561,6 +613,7 @@ typedef int (*handler_fn)(struct request_ctx *ctx);
 | 클라이언트 비정상 종료 | 요청 도중 끊김 | `read()` 0 또는 ECONNRESET → 조용히 정리 | conn |
 | | 응답 도중 끊김 | SIGPIPE 무시 → `write()` EPIPE → 정리 | net, main |
 | 보안 | 경로 탐색 (`..`, `%2e%2e`, `%00`) | 400 또는 403 | static_handler |
+| | 프록시 경로에 `..` 조각 (`%2e` · `%2f` · `..;` 포함) | 400. 라우터와 백엔드가 경로를 다르게 해석할 수 있어 거부 (2026-11-25) | proxy |
 | | 요청 스머글링 (CL + TE) | 400 | http_parser |
 | 과부하 | 작업 큐 가득 참 | 503 | main |
 

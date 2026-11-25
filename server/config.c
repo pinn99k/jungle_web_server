@@ -89,9 +89,11 @@ static const char *parse_route_line(struct server_config *c, char *line)
 // 이유: 설정 파일과 CLI 인자가 같은 키 · 같은 범위 검사를 쓰게 한다
 static const char *apply_key(struct server_config *c, const char *key, const char *val)
 {
-    if (strcmp(key, "root") == 0) {
-        int n = snprintf(c->root, sizeof c->root, "%s", val);
-        return (n < 0 || (size_t)n >= sizeof c->root) ? "root 경로가 너무 김" : NULL;
+    char *path = strcmp(key, "root") == 0 ? c->root
+                 : strcmp(key, "lock_file") == 0 ? c->lock_file : NULL;
+    if (path != NULL) {
+        int n = snprintf(path, CONFIG_ROOT_MAX, "%s", val);
+        return (n < 0 || n >= CONFIG_ROOT_MAX) ? "경로가 너무 김" : NULL;
     }
     const struct { const char *name; long min; long max; int *dst; } keys[] = {
         {"port", 1, 65535, &c->port},
@@ -100,6 +102,8 @@ static const char *apply_key(struct server_config *c, const char *key, const cha
         {"request_deadline_ms", 1, 600000, &c->request_deadline_ms},
         {"backend_connect_timeout_ms", 1, 600000, &c->backend_connect_timeout_ms},
         {"backend_timeout_ms", 1, 600000, &c->backend_timeout_ms},
+        {"standby_timeout_ms", 1, 600000, &c->standby_timeout_ms},
+        {"standby_fails", 1, 100, &c->standby_fails},
     };
     for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++) {
         long v;
@@ -125,6 +129,8 @@ void config_defaults(struct server_config *c)
     c->request_deadline_ms = 10000;
     c->backend_connect_timeout_ms = 1000;
     c->backend_timeout_ms = 3000;
+    c->standby_timeout_ms = 1000;
+    c->standby_fails = 3;
     char def[] = "/ static";
     parse_route_line(c, def);
 }

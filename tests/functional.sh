@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.." || exit 1
 PORT=18080
 U="http://127.0.0.1:$PORT"
 CONF=$(mktemp)
-printf 'port %s\nroute /api/ proxy 127.0.0.1:18001 127.0.0.1:18002\nroute / static\n' "$PORT" > "$CONF"
+printf 'port %s\nroute /api/ proxy 127.0.0.1:18001 127.0.0.1:18002\nroute /fake/ proxy 127.0.0.1:18003\nroute / static\n' "$PORT" > "$CONF"
 
 ./build/backend 18001 2>/dev/null & B1=$!
 ./build/backend 18002 2>/dev/null & B2=$!
@@ -61,6 +61,12 @@ echo "== 리버스 프록시"
 check "Round-Robin 교대" "18001 18002" "$(port_of) $(port_of)"
 check "본문 전달" hello "$(curl -s -d hello "$U/api/echo")"
 check "처리하지 않는 메서드도 백엔드로 전달 (백엔드 404)" 404 "$(code -X DELETE "$U/api/x")"
+check "프록시 경로의 .. 400" "400 400 400" "$(code "$U/api/../x") $(code "$U/api/%2e%2e/x") $(code "$U/api/..%2fx")"
+check "쿼리와 이름 속 ..은 통과" "200 404" "$(code "$U/api/time?q=../x") $(code "$U/api/a..b")"
+check "HEAD 뒤 같은 연결의 다음 응답" "404 200" "$( (printf 'HEAD /api/x HTTP/1.1\r\nHost: x\r\n\r\n'; sleep 0.5; printf 'GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n'; sleep 0.3) | nc -w 3 127.0.0.1 "$PORT" | grep -a -v '<h1>404' | grep -a '^HTTP' | cut -d' ' -f2 | tr '\n' ' ' | sed 's/ $//')"
+check "HEAD 응답에 본문이 없음" 0 "$( (printf 'HEAD /api/x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n'; sleep 0.3) | nc -w 3 127.0.0.1 "$PORT" | grep -a -c '<h1>')"
+(printf 'HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nHELLOEXTRA'; sleep 0.3) | timeout 4 nc -N -l 127.0.0.1 18003 >/dev/null & sleep 0.3
+check "길이보다 많이 온 본문은 자름" HELLO "$( (printf 'GET /fake/x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n'; sleep 0.3) | nc -w 3 127.0.0.1 "$PORT" | tail -n 1)"
 check "응답 지연 504" 504 "$(code "$U/api/slow")"
 sleep 3 # /api/slow를 받은 백엔드가 5초 sleep을 마칠 때까지
 
