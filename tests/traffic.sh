@@ -88,7 +88,10 @@ student() {
         n=1; [ "$2" = multi ] && n=3
         for k in $(seq $n); do
             local jar="$D/jar_$3_$k"
-            code=$(curl -s -m $m -o /dev/null -w '%{http_code}' -c "$jar" -b "$jar" -d "student=$3" "$U/api/apply")
+            local left=$((12000 - ($(now) - start)))
+            [ $left -le 100 ] && break 2
+            [ $((m * 1000)) -gt $left ] && left=$left || left=$((m * 1000))
+            code=$(curl -s -m $((left / 1000)).$(printf '%03d' $((left % 1000))) -o /dev/null -w '%{http_code}' -c "$jar" -b "$jar" -d "student=$3" "$U/api/apply")
             if [ "$code" = 200 ]; then ok=1; break 2; fi
         done
         [ "$2" = leave ] && break
@@ -122,26 +125,26 @@ crowd() {
     done
     wait $users
 }
-# 상황 3. 신청 시작: 백엔드는 신청 한 건에 1초(cold), 3대라 초당 3건. 초당 10명이 10초 (약 3.3배)
+# 상황 3. 신청 기간: 백엔드는 신청 한 건에 1초(cold), 3대라 초당 3건. 초당 10명이 10초 (약 3.3배). 모두 12초까지 참음
 s3() {
-    local r cfg name
+    local r name cfg w q
     for r in $(seq "$REP"); do
-        for name in "기억 없음(지금)" "번호표 유예 1초" "번호표 유예 3초" "번호표 유예 10초" "번호표 유예 3초 자리 6" "번호표 추첨"; do
+        for name in "A 처음: 차례대로, 줄 128, 워커 8" "B 줄 24" "C 줄 8" "D 번호표 자리 3" "E 번호표 자리 6" "F 번호표 자리 9" "G 번호표 자리 12"; do
+            w=24; q=128; cfg="balance rr"
             case $name in
-                기억*) cfg="" ;;
-                *"1초"*) cfg=$'gate_path /api/apply\ngate_slots 3\ngate_grace_ms 1000' ;;
-                *"자리 6"*) cfg=$'gate_path /api/apply\ngate_slots 6\ngate_grace_ms 3000' ;;
-                *"3초"*) cfg=$'gate_path /api/apply\ngate_slots 3\ngate_grace_ms 3000' ;;
-                *"10초"*) cfg=$'gate_path /api/apply\ngate_slots 3\ngate_grace_ms 10000' ;;
-                *추첨*) cfg=$'gate_path /api/apply\ngate_slots 3\ngate_grace_ms 3000\ngate_lottery 1' ;;
+                A*) w=8 ;;
+                B*) w=8; q=24 ;;
+                C*) w=8; q=8 ;;
+                *자리*) cfg="balance rr
+gate_path /api/apply
+gate_grace_ms 3000
+gate_slots ${name##* }" ;;
             esac
             backend 1 1 cold=600000; backend 2 1 cold=600000; backend 3 1 cold=600000
-            server 8 24 "balance least
-backend_timeout_ms 20000
-$cfg" "$R3"
-            local c0; c0=$(cpu)
+            server $w $q "$cfg
+backend_timeout_ms 20000" "$R3"
             crowd 10 10 polite polite press flaky leave multi
-            echo "신청 시작, $name (CPU 쉰 비율 $(echo "$c0 $(cpu)" | awk '{printf "%d%%", 100*($4-$2)/($3-$1)}'))"
+            echo "신청 기간, $name"
             summary
             stop_all
         done
@@ -152,11 +155,13 @@ $cfg" "$R3"
 s4() {
     local r name cfg
     for r in $(seq "$REP"); do
-        for name in "차례대로(지금)" "고르게" "빼기+고르게"; do
+        for name in "차례대로" "고르게" "덜 바쁜 쪽" "차례대로+빼기" "덜 바쁜 쪽+빼기"; do
             case $name in
-                차례*) cfg="balance rr" ;;
+                차례대로) cfg="balance rr" ;;
                 고르게) cfg="balance even" ;;
-                빼기*) cfg=$'balance even\neject_fails 2\neject_ms 5000' ;;
+                "덜 바쁜 쪽") cfg="balance least" ;;
+                "차례대로+빼기") cfg=$'balance rr\neject_fails 2\neject_ms 5000' ;;
+                *) cfg=$'balance least\neject_fails 2\neject_ms 5000' ;;
             esac
             backend 1 1; backend 2 1; backend 3 1
             server 24 24 "$cfg" "$R3"
@@ -167,6 +172,7 @@ s4() {
             [ -f "$D/pid" ] && PIDS="$PIDS $(cat "$D/pid")"
             stop_all
         done
+        [ "${SKIP_B:-0}" = 1 ] && continue
         for name in "그대로" "조회만 다시"; do
             [ "$name" = "그대로" ] && cfg=$'balance even' || cfg=$'balance even\nretry_safe 1'
             backend 1 8 cold=600000; backend 2 8 cold=600000; backend 3 8 cold=600000
