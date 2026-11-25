@@ -16,7 +16,7 @@ LIB_SRC    := $(COMMON_SRC) server/mime.c server/static_handler.c server/config.
               server/balance.c server/gate.c
 SERVER_SRC := server/main.c $(LIB_SRC)
 # 백엔드는 common/만 쓴다 (server/ 모듈을 링크하지 않음)
-BACKEND_SRC := backend/main.c $(COMMON_SRC)
+BACKEND_SRC := backend/main.c backend/ledger.c $(COMMON_SRC)
 TEST_SRC   := $(wildcard tests/test_*.c)
 
 SERVER_OBJ := $(SERVER_SRC:%.c=$(BUILD)/obj/%.o)
@@ -33,12 +33,15 @@ ASAN_TESTS      := $(TEST_SRC:tests/%.c=$(BUILD)/asan/tests/%)
 # 테스트 .o를 중간 파일로 보고 지우면 매번 다시 컴파일하므로 남겨 둔다
 .SECONDARY:
 
-all: $(BUILD)/server $(BUILD)/backend
+all: $(BUILD)/server $(BUILD)/backend $(BUILD)/ledger
 
 $(BUILD)/server: $(SERVER_OBJ)
 	$(CC) $(LDFLAGS) -o $@ $^
 
 $(BUILD)/backend: $(BACKEND_OBJ)
+	$(CC) $(LDFLAGS) -o $@ $^
+
+$(BUILD)/ledger: $(BUILD)/obj/backend/ledger_tool.o $(BUILD)/obj/backend/ledger.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
 $(BUILD)/tests/%: $(BUILD)/obj/tests/%.o $(COMMON_OBJ)

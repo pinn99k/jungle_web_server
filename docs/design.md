@@ -625,6 +625,52 @@ main.c: `static int open_listener(const struct server_config *cfg)` — 이어�
 
 설정: `gate_path`(없으면 끔), `gate_slots`, `gate_grace_ms`, `gate_lottery`. 공유 상태: 번호표 목록 하나와 락 하나 (순서와 개수를 함께 바꿔야 해서 원자적 변수로 안 된다). 프록시가 죽으면 줄도 사라진다. 응답: 503 + `Set-Cookie: qticket` + `Retry-After` · 처리 중 409 · 이미 성공 200.
 
+### 스텝 16. 좌석 장부 (`backend/ledger.c`)
+
+백엔드 3대가 함께 보는 공유 메모리 파일. DB의 행 잠금을 흉내 낸다. 질문 지도: Q10 9장.
+
+| 함수 | 하는 일 |
+|---|---|
+| `ledger_create` · `ledger_open` | 장부 파일을 만들고 · 연다. 과목마다 잠금 하나 (프로세스끼리, 쥔 쪽이 죽어도 풀림) |
+| `ledger_apply` | 여는 시각 확인 → 과목 잠금 → `lock_ms` 일 → 이미 됨 · 마감 · 배정 |
+| `ledger_dump` | 정원 초과 · 중복 검사 (`build/ledger dump`) |
+| `do_course_apply` (backend) | `POST /api/apply/<과목>` 45~95ms 기다린 뒤 장부에 적음. 200 · 409 마감 · 403 시작 전 · 400 |
+
+완료 확인: 정원 50에 600명이 3대로 동시에, 도중에 한 대 `kill -9` → 정원 초과 · 중복 0, 그 과목이 계속 답함.
+
+### 스텝 17. 서버별 자리 · 큰 줄 · 연결 닫기
+
+| 바뀌는 곳 | 하는 일 |
+|---|---|
+| `config` | `route <경로> proxy <백엔드>... slots=N` (한 백엔드에 동시에 N건까지), `backlog`, `queue` 상한 16,384 |
+| `balance_begin` | 자리가 있을 때만 세고 0, 꽉 찼으면 -1 (검사와 세기를 한 번에) |
+| `balance_pick` | 자리가 꽉 찬 서버는 건너뛴다. 멀쩡한 서버가 모두 꽉 찼으면 아픈 서버로 넘치지 않고 -1 |
+| `balance_capacity` | 아프지 않은 서버 수 × N. 줄 서기가 "지금 몇 명까지"를 이것으로 정한다 |
+| `conn` · `thread_pool` | 큐에서 기다리는 연결 수(원자적)를 세고, 있으면 `Connection: close`, 쉬는 연결은 바로 닫는다 |
+| `net_wait_readable` | 다음 요청을 0.1초씩 나눠 기다려, 줄이 생기면 워커를 바로 돌려준다 |
+
+자리는 라우트마다 따로 센다. 신청(`/api/apply/`)이 꽉 차도 조회(`/api/`)는 자기 워커와 백엔드를 쓴다.
+
+### 스텝 18. 번호판과 의자 (`server/gate.c` 다시 씀)
+
+| 함수 | 하는 일 |
+|---|---|
+| `gate_enter` | 번호표 확인 · 발급 → 부른 순번이면 의자에 앉아 자리가 날 때까지 최대 2초 → PASS / WAIT(안내 시간) / BUSY / FULL |
+| `gate_leave` | 자리를 돌려주고 걸린 시간 평균 · 마감 기억을 고친 뒤 다음 사람을 들인다 |
+| `move_board` | 부른 순번을 `자리 ÷ 걸린 시간 × 부르는 속도`만큼 올린다. 의자가 차면 멈춘다 |
+| `dispatch` | 자리가 비면 앉은 사람 중 순번이 빠른 사람부터 (과목별 자리가 있으면 그 안에서) |
+
+- 번호표 = 순번 8자 + 비밀 24자. 순번으로 배열 칸을 바로 찾는다 (65,536칸).
+- 오라고 한 시각보다 `gate_grace_ms` 넘게 늦으면 떠난 것 → 새 번호표.
+- 기다리라는 답: 503 + `Set-Cookie` + `Retry-After` + `X-Wait-Ms`. 늘 `Connection: close`.
+- 설정: `gate_path /api/apply/`(끝이 `/`면 그 아래 전부, 뒤 숫자를 과목으로 봄) · `gate_chairs` · `gate_overbook`(%) · `gate_next tail|keep` · `gate_course_slots` · `gate_soldout_ms`. `gate_lottery`와 DONE 기억은 지운다.
+
+### 스텝 19. 학생 클라이언트 (`client/students.c`)
+
+`poll` 하나로 학생 5,000명을 흉내 낸다 (ADR 0002 예외). 서버 코드를 쓰지 않는다. 조건은 Q10 6장. 결과는 신청마다 한 줄 CSV, 요약은 `tests/summary.awk`.
+
+---
+
 ## 8. 엣지 케이스 대응표
 
 | 명세서 항목 | 상황 | 처리 | 담당 |

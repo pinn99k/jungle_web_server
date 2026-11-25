@@ -9,12 +9,13 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "backend/ledger.h"
 #include "common/buf.h"
 #include "common/http_parser.h"
 #include "common/http_response.h"
 #include "common/net.h"
 
-#define LISTEN_BACKLOG 64
+#define LISTEN_BACKLOG 1024
 #define READ_CHUNK 4096
 #define CLIENT_TIMEOUT_MS 5000
 #define SLOW_SECONDS 5
@@ -22,12 +23,15 @@
 #define COURSES_MS 10
 #define APPLY_MS 100
 #define STATS_MS 2000
+#define APPLY_PREFIX "/api/apply/"
 #define COLD_FACTOR 10                  /* 막 켜진 서버는 이만큼 느리다 */
 #define MAX_THREADS 256
 
 // 시작할 때 한 번 정하고 그 뒤로는 읽기만 하는 상황 스위치 (측정용)
 static int fail_mode;                   /* 1이면 모든 요청에 바로 500 */
 static long cold_until_ms;              /* 이 시각까지 모든 일이 COLD_FACTOR배 느림 */
+static struct ledger *ledger;           /* 좌석 장부. 없으면 과목 신청을 받지 않음 */
+static int lock_ms = 5;                 /* 과목 잠금을 쥐고 있는 시간 */
 
 // 헤더와 본문을 조립해 보낸다 (항상 Connection: close)
 // 이유: 프록시가 요청마다 새 연결을 쓰고 Connection: close로 보내므로, 응답 하나 뒤 닫는 게 약속이다
@@ -203,6 +207,33 @@ static void do_apply(int fd, int port, const struct http_message *m, const char 
     respond(fd, 200, "application/json", body, (size_t)n);
 }
 
+// "/api/apply/<과목>"에 신청한다. 45~95ms 일한 뒤 장부에 적는다. 된 것 200 · 마감 409 · 시작 전 403 · 잘못 400
+// 이유: 실제 신청처럼 과목마다 정원이 있고, 같은 과목은 한 명씩 처리된다
+static void do_course_apply(int fd, int port, const struct http_message *m, const char *raw)
+{
+    static const int STATUS[] = {200, 409, 200, 403, 400};
+    static const char *const BODY[] = {"{\"ok\":true,", "{\"full\":true,", "{\"already\":true,",
+                                       "{\"closed\":true,", "{\"bad\":true,"};
+    static _Thread_local unsigned seed;
+    char body[96];
+    char *end;
+    long course = strtol(m->target + strlen(APPLY_PREFIX), &end, 10);
+    long id = student_id(raw + m->header_len, m->total_len - m->header_len);
+    if (ledger == NULL || *end != '\0' || id < 0 || id >= LEDGER_STUDENTS) {
+        respond_error(fd, 400);
+        return;
+    }
+    enum ledger_result r = LEDGER_CLOSED;
+    if (!ledger_closed(ledger)) {
+        if (seed == 0)
+            seed = (unsigned)(now_ms() ^ (long)pthread_self());
+        wait_ms(45 + (int)(rand_r(&seed) % 51));
+        r = ledger_apply(ledger, (int)course, (int)id, lock_ms);
+    }
+    int n = snprintf(body, sizeof body, "%s\"port\":%d}\n", BODY[r], port);
+    respond(fd, STATUS[r], "application/json", body, (size_t)n);
+}
+
 static const struct {
     const char *method;
     const char *path;
@@ -211,13 +242,19 @@ static const struct {
     {"GET", "/api/time", do_time},       {"POST", "/api/echo", do_echo},
     {"GET", "/api/slow", do_slow},       {"GET", "/api/work", do_work},
     {"GET", "/api/courses", do_courses}, {"POST", "/api/apply", do_apply},
-    {"GET", "/api/stats", do_stats},
+    {"GET", "/api/stats", do_stats},     {"GET", "/api/cart", do_courses},
+    {"GET", "/api/result", do_courses},
 };
 
 // 메서드 · 경로에 맞는 기능을 표에서 찾아 실행한다. 없으면 404
 // 이유: 경로마다 모양이 같으므로 표에 한 줄을 더하면 기능이 늘어난다
 static void route_request(int fd, int port, const struct http_message *m, const char *raw)
 {
+    if (strcmp(m->method, "POST") == 0
+        && strncmp(m->target, APPLY_PREFIX, strlen(APPLY_PREFIX)) == 0) {
+        do_course_apply(fd, port, m, raw);
+        return;
+    }
     for (size_t i = 0; i < sizeof ROUTES / sizeof ROUTES[0]; i++) {
         if (strcmp(m->method, ROUTES[i].method) == 0 && path_is(m->target, ROUTES[i].path)) {
             ROUTES[i].handle(fd, port, m, raw);
@@ -289,7 +326,7 @@ static long parse_arg(const char *s, long max)
     return (end == s || *end != '\0' || v < 1 || v > max) ? -1 : v;
 }
 
-// 상황 인자를 스위치에 적용한다: "fail" 또는 "cold=밀리초". 성공 0, 모르는 인자 -1
+// 상황 인자를 스위치에 적용한다: "fail" · "cold=밀리초" · "ledger=파일" · "lock=밀리초". 성공 0, 모르는 인자 -1
 // 이유: 업데이트 실수(바로 500)와 막 켜진 서버(잠깐 느림)를 코드 수정 없이 만든다
 static int apply_mode(const char *mode)
 {
@@ -297,6 +334,10 @@ static int apply_mode(const char *mode)
         fail_mode = 1;
         return 0;
     }
+    if (strncmp(mode, "ledger=", 7) == 0)
+        return (ledger = ledger_open(mode + 7)) != NULL ? 0 : -1;
+    if (strncmp(mode, "lock=", 5) == 0)
+        return (lock_ms = (int)parse_arg(mode + 5, 1000)) > 0 ? 0 : -1;
     if (strncmp(mode, "cold=", 5) != 0)
         return -1;
     long ms = parse_arg(mode + 5, 600000);
@@ -312,8 +353,12 @@ int main(int argc, char **argv)
 {
     long port = argc >= 2 ? parse_arg(argv[1], 65535) : -1;
     long threads = argc >= 3 ? parse_arg(argv[2], MAX_THREADS) : 1;
-    if (argc > 4 || port < 0 || threads < 0 || (argc == 4 && apply_mode(argv[3]) < 0)) {
-        fprintf(stderr, "사용법: %s <포트> [처리 스레드 수 1~%d] [fail|cold=밀리초]\n", argv[0], MAX_THREADS);
+    int bad = port < 0 || threads < 0;
+    for (int i = 3; i < argc && !bad; i++)
+        bad = apply_mode(argv[i]) < 0;
+    if (bad) {
+        fprintf(stderr, "사용법: %s <포트> [처리 스레드 수 1~%d] [fail|cold=ms|ledger=파일|lock=ms]...\n",
+                argv[0], MAX_THREADS);
         return 1;
     }
     struct sigaction sa;
