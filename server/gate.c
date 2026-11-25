@@ -255,8 +255,13 @@ static enum gate_result enter_locked(const char *ticket, const char *secret, int
     snprintf(out->ticket, sizeof out->ticket, "%08x%s", e->order, e->secret);
     if (e->state != OUTSIDE)
         return GATE_BUSY;
-    if (e->order <= g.board && chair_ok(rule, course) && sit(e, course, rule))
-        return GATE_PASS;
+    if (e->order <= g.board) {
+        if (chair_ok(rule, course) && sit(e, course, rule))
+            return GATE_PASS;
+        // 이어서는 번호표 1장이 여러 건이라 너무 많이 부르게 된다. 부른 사람이 앉지 못하면 번호판을 잠깐 멈춘다
+        if (rule->keep && g.moved_at < now + MIN_WAIT_MS)
+            g.moved_at = now + MIN_WAIT_MS;
+    }
     // 의자에서 2초를 보냈을 수 있으므로 시각은 늦은 쪽으로 다시 맞춘다
     tell_wait(e, rule, now > g.moved_at ? now : g.moved_at, out);
     return GATE_WAIT;
