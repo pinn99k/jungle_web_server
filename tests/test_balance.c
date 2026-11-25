@@ -12,7 +12,7 @@ static void deal(int route, int n, int times, int *count)
 {
     for (int i = 0; i < times; i++) {
         int b = balance_pick(&C, route, n, 0, 1000);
-        balance_begin(route, b);
+        balance_begin(&C, route, b);
         balance_end(&C, route, b, 0, 1000);
         count[b]++;
     }
@@ -58,12 +58,12 @@ static void test_spill(void)
 static void test_least(void)
 {
     reset(BALANCE_LEAST);
-    balance_begin(3, 0);
-    balance_begin(3, 0);
-    balance_begin(3, 1);
+    balance_begin(&C, 3, 0);
+    balance_begin(&C, 3, 0);
+    balance_begin(&C, 3, 1);
     for (int i = 0; i < 3; i++)
         CHECK_INT(balance_pick(&C, 3, 3, 0, 0), 2);
-    balance_begin(3, 2);
+    balance_begin(&C, 3, 2);
     CHECK(balance_pick(&C, 3, 3, 0, 0) != 0);
 }
 
@@ -74,13 +74,13 @@ static void test_eject(void)
     reset(BALANCE_EVEN);
     C.eject_fails = 2;
     C.eject_ms = 1000;
-    balance_begin(4, 1);
+    balance_begin(&C, 4, 1);
     balance_end(&C, 4, 1, 1, 5000);
     int count[3] = {0};
     for (int i = 0; i < 30; i++)
         count[balance_pick(&C, 4, 3, 0, 5000)]++;
     CHECK(count[1] > 0);
-    balance_begin(4, 1);
+    balance_begin(&C, 4, 1);
     balance_end(&C, 4, 1, 1, 5000);
     for (int i = 0; i < 30; i++)
         CHECK(balance_pick(&C, 4, 3, 0, 5500) != 1);
@@ -90,9 +90,9 @@ static void test_eject(void)
     CHECK(count[1] > 0);
     // 모두 아프면 그래도 하나는 고른다
     for (int b = 0; b < 3; b++) {
-        balance_begin(4, b);
+        balance_begin(&C, 4, b);
         balance_end(&C, 4, b, 1, 7000);
-        balance_begin(4, b);
+        balance_begin(&C, 4, b);
         balance_end(&C, 4, b, 1, 7000);
     }
     CHECK(balance_pick(&C, 4, 3, 0, 7100) >= 0);
@@ -104,9 +104,9 @@ static void test_slow_start(void)
 {
     reset(BALANCE_EVEN);
     C.slow_start_ms = 10000;
-    balance_begin(5, 0);
+    balance_begin(&C, 5, 0);
     balance_end(&C, 5, 0, 1, 0);
-    balance_begin(5, 0);
+    balance_begin(&C, 5, 0);
     balance_end(&C, 5, 0, 0, 1000);
     int count[2] = {0};
     for (int i = 0; i < 200; i++)
@@ -118,6 +118,29 @@ static void test_slow_start(void)
     CHECK_INT(count[0], 100);
 }
 
+// 자리가 찬 서버를 건너뛰고, 다 차면 아픈 서버로 넘치지 않고 -1, 자리 수는 멀쩡한 서버만 세는지 본다
+// 이유: 한 대에 정한 수보다 많이 보내지 않는 것이 자리 제한의 전부다
+static void test_slots(void)
+{
+    reset(BALANCE_LEAST);
+    C.eject_fails = 1;
+    C.routes[9].slots = 2;
+    C.routes[9].backend_count = 3;
+    CHECK_INT(balance_capacity(&C, 9, 1000), 6);
+    for (int i = 0; i < 6; i++) {
+        int b = balance_pick(&C, 9, 3, 0, 1000);
+        CHECK(b >= 0);
+        CHECK_INT(balance_begin(&C, 9, b), 0);
+    }
+    CHECK_INT(balance_pick(&C, 9, 3, 0, 1000), -1);
+    CHECK_INT(balance_begin(&C, 9, 0), -1);
+    balance_end(&C, 9, 2, 1, 1000);
+    CHECK_INT(balance_pick(&C, 9, 3, 0, 1000), -1);
+    CHECK_INT(balance_capacity(&C, 9, 1000), 4);
+    balance_end(&C, 9, 1, 0, 1000);
+    CHECK_INT(balance_pick(&C, 9, 3, 0, 1000), 1);
+}
+
 // 모든 테스트를 실행하고, 하나라도 실패하면 종료 코드 1을 반환한다
 // 이유: make test가 종료 코드로 성공 · 실패를 판단한다
 int main(void)
@@ -127,5 +150,6 @@ int main(void)
     RUN(test_least);
     RUN(test_eject);
     RUN(test_slow_start);
+    RUN(test_slots);
     return TEST_EXIT();
 }

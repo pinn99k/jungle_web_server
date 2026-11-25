@@ -25,6 +25,7 @@ struct route {
     enum route_type type;
     struct backend backends[CONFIG_MAX_BACKENDS];
     int backend_count;
+    int slots;                          /* 백엔드 하나에 동시에 보내는 수. 0 = 제한 없음 */
 };
 
 // 서버 설정 전체. 시작할 때 한 번 채우고 이후에는 읽기만 한다
@@ -40,6 +41,7 @@ struct server_config {
     int standby_timeout_ms;             /* 보조가 메인의 응답을 기다리는 시간 */
     int standby_fails;                  /* 연속으로 이만큼 답이 없으면 이어받음 */
     int queue;                          /* 작업 큐 칸 수 (넘치면 503) */
+    int backlog;                        /* 커널이 대신 받아 두는 연결 수 */
     int balance;                        /* enum balance_policy */
     int eject_fails;                    /* 이어서 이만큼 실패하면 뺌. 0 = 안 뺌 */
     int eject_ms;                       /* 빼 두는 시간 */

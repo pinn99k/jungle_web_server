@@ -17,6 +17,7 @@
 
 #define READ_CHUNK 4096
 #define MAX_REQUESTS 100                /* 연결당 최대 요청 수 (5장 기본값) */
+#define IDLE_SLICE_MS 100              /* 다음 요청을 기다리며 줄이 생겼는지 보는 간격 */
 #define LINGER_MS 1000                  /* lingering close 최대 시간 (Q2) */
 #define LINGER_BYTES 65536              /* lingering close로 버릴 최대 바이트 (Q2) */
 
@@ -24,6 +25,9 @@ enum read_result { READ_DONE, READ_ERROR, READ_CLOSED, READ_IDLE, READ_TIMEOUT }
 
 // 종료 플래그 (CLAUDE.md가 허용한 전역 가변 상태 둘 중 하나). lock-free 원자적 변수라 시그널 핸들러에서 써도 안전
 atomic_int conn_stopping;
+
+// 큐에서 기다리는 연결 수. 워커 여럿이 읽고 스레드 풀이 쓴다 (핑구 승인 2026-11-25)
+atomic_int conn_waiting;
 
 // 연결 하나의 상태. 이 연결을 맡은 워커만 쓰므로 락이 없다
 struct conn {
@@ -69,6 +73,19 @@ struct conn *conn_new(int fd, const char *ip, const struct server_config *cfg)
     return c;
 }
 
+// 다음 요청의 첫 바이트를 기다린다. 오면 1, 시간이 지났거나 줄이 생겼으면 0
+// 이유: 쉬는 연결이 워커를 5초씩 쥐고 있으면 큐에서 기다리는 손님이 그만큼 늦어진다
+static int conn_wait_next(const struct conn *c)
+{
+    for (int left = c->cfg->client_timeout_ms; left > 0; left -= IDLE_SLICE_MS) {
+        if (net_wait_readable(c->fd, left < IDLE_SLICE_MS ? left : IDLE_SLICE_MS) != 0)
+            return 1;
+        if (atomic_load(&conn_waiting) > 0)
+            return 0;
+    }
+    return 0;
+}
+
 // 요청 하나가 완성될 때까지 읽고 파싱한다. DONE / ERROR / CLOSED / IDLE(기다리다 끝) / TIMEOUT
 // 이유: read 한 번 5초(소켓 타임아웃)와 요청 전체 10초(마감)를 함께 걸어 느린 손님이 워커를 붙잡지 못하게 한다
 static int conn_read_request(struct conn *c)
@@ -77,6 +94,8 @@ static int conn_read_request(struct conn *c)
     int started = c->in.len > 0;        /* 파이프라이닝으로 남은 바이트가 있으면 이미 시작된 요청 */
     if (started)
         clock_gettime(CLOCK_MONOTONIC, &start);
+    else if (c->requests > 0 && !conn_wait_next(c))
+        return READ_IDLE;
     for (;;) {
         if (c->in.len > 0) {
             enum parse_result res = http_parse(&c->parser, c->in.data, c->in.len);
@@ -134,8 +153,9 @@ static int conn_dispatch(struct conn *c)
 {
     const struct http_message *m = &c->parser.msg;
     const struct route *r = router_match(c->cfg, m->target);
-    // 종료 중이면 이번 응답을 마지막으로 닫는다 (Q6 지도 Q2: 진행 중 요청은 끝까지, 다음 요청은 안 받음)
-    c->keep = m->keep_alive && c->requests + 1 < MAX_REQUESTS && !atomic_load(&conn_stopping);
+    // 종료 중이거나 큐에 기다리는 손님이 있으면 이번 응답을 마지막으로 닫는다 (Q6 지도 Q2)
+    c->keep = m->keep_alive && c->requests + 1 < MAX_REQUESTS && !atomic_load(&conn_stopping)
+              && atomic_load(&conn_waiting) == 0;
     if (r == NULL) {
         conn_send_error(c, 404);
         return -1;

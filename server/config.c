@@ -38,11 +38,18 @@ static int parse_backend(const char *s, struct backend *out)
     return 0;
 }
 
-// strtok_r로 이어서 남은 토큰을 모두 백엔드 주소로 읽어 r에 넣는다. 성공 NULL, 실패 시 이유
+// strtok_r로 이어서 남은 토큰을 백엔드 주소와 slots=N으로 읽어 r에 넣는다. 성공 NULL, 실패 시 이유
 // 이유: proxy 라우트의 "백엔드 목록 검사"를 라우트 줄 해석과 나눠, 각각 한 가지 일만 하게 한다
 static const char *parse_backends(struct route *r, char **save)
 {
     for (char *b = strtok_r(NULL, " \t", save); b != NULL; b = strtok_r(NULL, " \t", save)) {
+        long slots;
+        if (strncmp(b, "slots=", 6) == 0) {
+            if (parse_int(b + 6, 0, 1024, &slots) < 0)
+                return "slots는 0~1024";
+            r->slots = (int)slots;
+            continue;
+        }
         if (r->backend_count >= CONFIG_MAX_BACKENDS)
             return "백엔드가 너무 많음 (최대 8)";
         if (parse_backend(b, &r->backends[r->backend_count++]) < 0)
@@ -59,7 +66,7 @@ static const char *parse_route_line(struct server_config *c, char *line)
     char *prefix = strtok_r(line, " \t", &save);
     char *type = strtok_r(NULL, " \t", &save);
     if (prefix == NULL || type == NULL || prefix[0] != '/' || strlen(prefix) >= CONFIG_PREFIX_MAX)
-        return "형식: route </경로> static | proxy <IPv4:포트>...";
+        return "형식: route </경로> static | proxy <IPv4:포트>... [slots=N]";
     if (c->route_count >= CONFIG_MAX_ROUTES)
         return "라우트가 너무 많음 (최대 16)";
     for (int i = 0; i < c->route_count; i++) {
@@ -69,6 +76,7 @@ static const char *parse_route_line(struct server_config *c, char *line)
     struct route *r = &c->routes[c->route_count];
     snprintf(r->prefix, sizeof r->prefix, "%s", prefix);
     r->backend_count = 0;
+    r->slots = 0;
     if (strcmp(type, "static") == 0) {
         r->type = ROUTE_STATIC;
         if (strtok_r(NULL, " \t", &save) != NULL)
@@ -123,7 +131,8 @@ static const char *apply_key(struct server_config *c, const char *key, const cha
         {"backend_timeout_ms", 1, 600000, &c->backend_timeout_ms},
         {"standby_timeout_ms", 1, 600000, &c->standby_timeout_ms},
         {"standby_fails", 1, 100, &c->standby_fails},
-        {"queue", 1, 4096, &c->queue},
+        {"queue", 1, 16384, &c->queue},
+        {"backlog", 1, 65535, &c->backlog},
         {"eject_fails", 0, 100, &c->eject_fails},
         {"eject_ms", 100, 600000, &c->eject_ms},
         {"slow_start_ms", 0, 600000, &c->slow_start_ms},
@@ -159,6 +168,7 @@ void config_defaults(struct server_config *c)
     c->standby_timeout_ms = 1000;
     c->standby_fails = 3;
     c->queue = 128;
+    c->backlog = 128;
     c->eject_ms = 10000;
     c->gate_slots = 16;
     c->gate_grace_ms = 3000;

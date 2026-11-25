@@ -36,12 +36,21 @@ static int warm_enough(const struct server_config *c, int route, int b, unsigned
     return (long)(turn % 100) < (percent < 5 ? 5 : percent);
 }
 
-// 시도하지 않은 백엔드 중 조건에 맞는 것을 cand에 담고 개수를 반환한다 (warm이면 천천히 늘리기도 본다)
+// 백엔드의 자리(slots)가 꽉 찼으면 1
+// 이유: 한 대가 견딜 만큼만 보내야 안에서 줄이 생기지 않는다. 남는 줄은 프록시가 세운다
+static int is_full(const struct server_config *c, int route, int b)
+{
+    int slots = c->routes[route].slots;
+    return slots > 0 && atomic_load(&inflight[route][b]) >= slots;
+}
+
+// 시도하지 않은 백엔드 중 조건에 맞는 것을 cand에 담고 개수를 반환한다. 자리가 꽉 차서 뺀 수는 *full에
 // 이유: 아픈 서버 · 막 돌아온 서버를 빼고도 하나도 안 남으면 조건을 풀어 다시 모아야 한다
 static int collect(const struct server_config *c, int route, int n, unsigned tried, unsigned turn,
-                   long now, int level, int *cand)
+                   long now, int level, int *cand, int *full)
 {
     int m = 0;
+    *full = 0;
     for (int b = 0; b < n; b++) {
         if (tried & (1u << b))
             continue;
@@ -49,7 +58,10 @@ static int collect(const struct server_config *c, int route, int n, unsigned tri
             continue;
         if (level < 1 && !warm_enough(c, route, b, turn, now))
             continue;
-        cand[m++] = b;
+        if (is_full(c, route, b))
+            (*full)++;
+        else
+            cand[m++] = b;
     }
     return m;
 }
@@ -96,19 +108,40 @@ int balance_pick(const struct server_config *c, int route, int n, unsigned tried
     unsigned turn = atomic_fetch_add(&turns[route], 1);
     int cand[CONFIG_MAX_BACKENDS];
     int m = 0;
+    int full = 0;
     // 0: 멀쩡하고 데워진 서버 → 1: 멀쩡한 서버 → 2: 아프더라도 남은 서버
-    for (int level = 0; level <= 2 && m == 0; level++)
-        m = collect(c, route, n, tried, turn, now, level, cand);
+    for (int level = 0; level <= 2 && m == 0; level++) {
+        // 멀쩡한 서버가 있는데 꽉 찼을 뿐이면 아픈 서버로 넘치지 않고 기다리게 한다
+        if (level == 2 && full > 0)
+            break;
+        m = collect(c, route, n, tried, turn, now, level, cand, &full);
+    }
     if (m == 0)
         return -1;
     return c->balance == BALANCE_LEAST ? least_busy(route, cand, m, turn) : cand[turn % (unsigned)m];
 }
 
-// 백엔드에 요청을 보내기 시작했음을 센다
-// 이유: "덜 바쁜 쪽"은 보내 놓고 안 끝난 수로 바쁨을 본다
-void balance_begin(int route, int b)
+// 백엔드에 요청을 보내기 시작했음을 센다. 0, 자리가 이미 꽉 찼으면 되돌리고 -1
+// 이유: 고르는 사이에 다른 워커가 마지막 자리를 가져갈 수 있어, 먼저 세고 넘쳤으면 되돌린다
+int balance_begin(const struct server_config *c, int route, int b)
 {
-    atomic_fetch_add(&inflight[route][b], 1);
+    int slots = c->routes[route].slots;
+    int before = atomic_fetch_add(&inflight[route][b], 1);
+    if (slots == 0 || before < slots)
+        return 0;
+    atomic_fetch_sub(&inflight[route][b], 1);
+    return -1;
+}
+
+// 지금 이 라우트가 동시에 처리할 수 있는 수를 반환한다. 제한이 없으면 0
+// 이유: 서버가 죽으면 들이는 사람도 그만큼 줄여야 남은 서버가 넘치지 않는다
+int balance_capacity(const struct server_config *c, int route, long now)
+{
+    const struct route *r = &c->routes[route];
+    int up = 0;
+    for (int b = 0; b < r->backend_count; b++)
+        up += atomic_load(&down_until[route][b]) <= now;
+    return (up > 0 ? up : r->backend_count) * r->slots;
 }
 
 // 요청이 끝났음을 센다. 이어서 eject_fails번 실패하면 eject_ms 동안 빼고, 성공하면 실패를 잊는다

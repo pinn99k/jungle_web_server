@@ -7,6 +7,9 @@
 
 struct conn;
 
+// 큐에서 워커를 기다리는 연결 수. 스레드 풀이 세고, conn은 0보다 크면 연결을 오래 쥐지 않는다
+extern atomic_int conn_waiting;
+
 // 종료 플래그. main의 시그널 핸들러가 1로 세우면 conn은 지금 요청의 응답을 Connection: close로 끝낸다
 extern atomic_int conn_stopping;
 

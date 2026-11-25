@@ -171,3 +171,15 @@ int net_set_nodelay(int fd)
     int on = 1;
     return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on);
 }
+
+// fd에 읽을 것이 생기기를 timeout_ms까지 기다린다. 생기면 1, 시간 초과 0, 실패 -1
+// 이유: 쉬는 연결을 짧게 나눠 기다려야, 줄이 생겼을 때 워커를 바로 돌려줄 수 있다
+int net_wait_readable(int fd, int timeout_ms)
+{
+    struct pollfd p = {.fd = fd, .events = POLLIN};
+    int rc;
+    do {
+        rc = poll(&p, 1, timeout_ms);
+    } while (rc < 0 && errno == EINTR);
+    return rc;
+}

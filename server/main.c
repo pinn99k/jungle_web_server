@@ -18,7 +18,6 @@
 #include "server/standby.h"
 #include "server/thread_pool.h"
 
-#define LISTEN_BACKLOG 128
 #define EMFILE_BACKOFF_NS 100000000L    /* 100ms */
 #define LISTEN_RETRY 40                 /* 이어받을 때 포트가 풀리길 기다리는 횟수 (50ms씩 2초) */
 #define LISTEN_RETRY_NS 50000000L
@@ -84,7 +83,8 @@ static struct thread_pool *start_pool(struct server_config *cfg)
     sigaddset(&set, SIGTERM);
     if (pthread_sigmask(SIG_BLOCK, &set, &old) != 0)
         return NULL;
-    struct thread_pool *pool = pool_create(cfg->threads, cfg->queue, on_connection, cfg);
+    struct thread_pool *pool = pool_create(cfg->threads, cfg->queue, on_connection, cfg,
+                                           &conn_waiting);
     pthread_sigmask(SIG_SETMASK, &old, NULL); /* 워커는 막힌 상태를 물려받았고, main만 다시 받음 */
     return pool;
 }
@@ -119,11 +119,11 @@ static void accept_loop(int lfd, struct thread_pool *pool)
 static int open_listener(const struct server_config *cfg)
 {
     int tries = cfg->lock_file[0] != '\0' ? LISTEN_RETRY : 0;
-    int lfd = net_listen((uint16_t)cfg->port, LISTEN_BACKLOG);
+    int lfd = net_listen((uint16_t)cfg->port, cfg->backlog);
     while (lfd < 0 && errno == EADDRINUSE && tries-- > 0) {
         struct timespec ts = {0, LISTEN_RETRY_NS};
         nanosleep(&ts, NULL);
-        lfd = net_listen((uint16_t)cfg->port, LISTEN_BACKLOG);
+        lfd = net_listen((uint16_t)cfg->port, cfg->backlog);
     }
     return lfd;
 }

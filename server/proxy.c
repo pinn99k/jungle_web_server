@@ -121,6 +121,22 @@ static int send_error(struct request_ctx *ctx, int status)
     return rc;
 }
 
+// 짧은 JSON 응답을 보내고 접근 로그 칸을 채운다. extra는 추가 헤더 줄. 보냈으면 0, 실패 -1
+// 이유: 줄 서기 · 자리 없음 응답이 같은 모양으로 나가게 한다
+static int send_json(struct request_ctx *ctx, int status, const char *extra, const char *body)
+{
+    struct buf out;
+    buf_init(&out);
+    size_t len = strlen(body);
+    int rc = -1;
+    if (http_build_header(&out, status, "application/json", (long)len, ctx->keep_alive, extra) == 0
+        && buf_append(&out, body, len) == 0)
+        rc = net_write_all(ctx->fd, out.data, out.len);
+    ctx->status = status;
+    buf_free(&out);
+    return rc;
+}
+
 // 백엔드 응답 헤더를 손님 쪽 헤더로 다시 써서 out에 만든다 (hop-by-hop은 빼고 Connection은 우리 기준). 성공 0
 // 이유: 백엔드가 보낸 "Connection: close"는 백엔드 연결 이야기라, 손님 연결의 keep-alive와는 따로 정해야 한다 (Q7)
 static int build_client_header(const struct http_message *resp, int keep, struct buf *out)
@@ -249,6 +265,17 @@ static int safe_to_retry(const struct request_ctx *ctx, int sent)
     return ctx->cfg->retry_safe && (strcmp(m, "GET") == 0 || strcmp(m, "HEAD") == 0);
 }
 
+// 자리가 있는 백엔드를 골라 자리를 잡고 번호를 반환한다. 다 찼으면 -1
+// 이유: 고른 뒤 자리를 잡기 전에 다른 워커가 채울 수 있어, 그때는 다시 고른다
+static int reserve(const struct server_config *c, int route, int n, unsigned tried)
+{
+    int b;
+    do {
+        b = balance_pick(c, route, n, tried, balance_now());
+    } while (b >= 0 && balance_begin(c, route, b) < 0);
+    return b;
+}
+
 // 백엔드를 골라 보내고, 다시 보내도 되는 실패면 다른 백엔드에 한 번 더 보낸다. 0 계속, -1 닫기
 // 이유: 고르기(balance)와 보내기(attempt)를 나눠, 정책을 바꿔도 전달 코드는 그대로다
 static int forward(struct request_ctx *ctx, const struct buf *req)
@@ -259,10 +286,9 @@ static int forward(struct request_ctx *ctx, const struct buf *req)
     unsigned tried = 0;
     for (int t = 0; t < (n > 1 ? 2 : 1); t++) {
         int sent;
-        int b = balance_pick(ctx->cfg, route, n, tried, balance_now());
+        int b = reserve(ctx->cfg, route, n, tried);
         if (b < 0)
             break;
-        balance_begin(route, b);
         int rc = attempt(ctx, b, req, &sent);
         balance_end(ctx->cfg, route, b, rc > 0 || ctx->status >= 500, balance_now());
         if (rc <= 0)
@@ -272,23 +298,9 @@ static int forward(struct request_ctx *ctx, const struct buf *req)
         if (!safe_to_retry(ctx, sent))
             break;
     }
-    return send_error(ctx, status);
-}
-
-// 짧은 JSON 응답을 보내고 접근 로그 칸을 채운다. extra는 추가 헤더 줄. 보냈으면 0, 실패 -1
-// 이유: 줄 서기 응답(기다림 · 처리 중 · 이미 됨)이 같은 모양으로 나가게 한다
-static int send_json(struct request_ctx *ctx, int status, const char *extra, const char *body)
-{
-    struct buf out;
-    buf_init(&out);
-    size_t len = strlen(body);
-    int rc = -1;
-    if (http_build_header(&out, status, "application/json", (long)len, ctx->keep_alive, extra) == 0
-        && buf_append(&out, body, len) == 0)
-        rc = net_write_all(ctx->fd, out.data, out.len);
-    ctx->status = status;
-    buf_free(&out);
-    return rc;
+    // 한 번도 못 보냈으면 서버가 아픈 게 아니라 자리가 다 찬 것이다
+    return tried == 0 ? send_json(ctx, 503, "Retry-After: 1\r\n", "{\"busy\":true}\n")
+                      : send_error(ctx, status);
 }
 
 // Cookie 헤더에서 qticket 값(32자)을 찾아 out에 적는다. 없으면 0, 있으면 1

@@ -22,6 +22,7 @@ struct thread_pool {
     pthread_cond_t not_empty;
     pool_work_fn work;
     void *arg;
+    atomic_int *waiting;                /* count를 락 없이 보여 주는 칸 */
 };
 
 // 큐에서 작업을 꺼내 work를 실행하는 것을 반복한다. 종료 중이고 큐가 비면 끝낸다. 항상 NULL
@@ -41,6 +42,7 @@ static void *worker_main(void *arg)
         struct job j = p->queue[p->head];
         p->head = (p->head + 1) % p->cap;
         p->count--;
+        atomic_store(p->waiting, p->count);
         pthread_mutex_unlock(&p->lock);
         p->work(j.fd, j.ip, p->arg); /* 락 밖에서 실행해야 다른 워커가 동시에 꺼낼 수 있다 */
     }
@@ -65,7 +67,8 @@ static void pool_destroy(struct thread_pool *p, int started)
 
 // 워커 스레드 nthreads개와 크기 queue_cap의 빈 작업 큐를 만든다. 실패 NULL
 // 이유: 스레드를 요청마다 만들지 않고 미리 만들어 두어, 생성 비용과 동시 스레드 수를 고정한다
-struct thread_pool *pool_create(int nthreads, int queue_cap, pool_work_fn work, void *arg)
+struct thread_pool *pool_create(int nthreads, int queue_cap, pool_work_fn work, void *arg,
+                                atomic_int *waiting)
 {
     struct thread_pool *p = calloc(1, sizeof *p);
     if (p == NULL)
@@ -76,6 +79,7 @@ struct thread_pool *pool_create(int nthreads, int queue_cap, pool_work_fn work, 
     p->cap = queue_cap;
     p->work = work;
     p->arg = arg;
+    p->waiting = waiting;
     if (p->threads == NULL || p->queue == NULL || pthread_mutex_init(&p->lock, NULL) != 0) {
         free(p->threads);
         free(p->queue);
@@ -105,6 +109,7 @@ int pool_submit(struct thread_pool *p, int fd, const char *ip)
     j->fd = fd;
     snprintf(j->ip, sizeof j->ip, "%s", ip);
     p->count++;
+    atomic_store(p->waiting, p->count);
     pthread_cond_signal(&p->not_empty);
     pthread_mutex_unlock(&p->lock);
     return 0;

@@ -20,6 +20,9 @@ int net_write_all(int fd, const void *data, size_t n);
 // 숫자 IPv4 host:port에 timeout_ms 안에 연결해 fd(블로킹)를 반환한다. 실패 -1 (시간 초과면 errno = ETIMEDOUT)
 int net_connect(const char *host, uint16_t port, int timeout_ms);
 
+// fd에 읽을 것이 생기기를 timeout_ms까지 기다린다. 생기면(상대가 닫은 것 포함) 1, 시간 초과 0, 실패 -1
+int net_wait_readable(int fd, int timeout_ms);
+
 // 작은 패킷을 모아 보내는 Nagle 알고리즘을 끈다 (TCP_NODELAY). 성공 0, 실패 -1
 int net_set_nodelay(int fd);
 
