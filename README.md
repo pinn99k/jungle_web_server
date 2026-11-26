@@ -83,7 +83,7 @@ flowchart LR
 
 ### 가장 오래 고민한 것: 공정하려던 규칙이 반복 요청을 도왔다
 
-<img src="docs/images/fairness-flow.webp" alt="토큰 재발급 → 창 3개 이득 → 토큰 유지 → 가설 1 기각 → 가설 2(토큰 1개 = 5건) → 입장 허용 멈춤으로 수정" width="240">
+<img src="docs/images/fairness-process.webp" alt="토큰 재발급 → 창 3개 이득 → 토큰 유지 → 가설 1 기각 → 가설 2(토큰 1개 = 5건) → 입장 허용 멈춤으로 수정" width="900">
 
 고친 뒤에도 역전율이 남았습니다. 버그가 아니라 **"먼저"의 뜻이 두 가지**였습니다.
 
