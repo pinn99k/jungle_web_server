@@ -36,7 +36,7 @@ static void on_connection(int fd, const char *ip, void *arg)
 }
 
 // 작업 큐가 가득 찼을 때 503을 보내고 닫는다
-// 이유: 대기 줄이 무한히 길어지지 않게 하고, 손님에게 "지금은 바쁨"을 알린다 (lingering 없음, Q10)
+// 이유: 대기 줄이 무한히 길어지지 않게 하고, 클라이언트에게 "지금은 바쁨"을 알린다 (lingering 없음, Q10)
 static void reject_busy(int fd)
 {
     struct buf out;
@@ -62,7 +62,7 @@ static int install_signals(void)
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sigemptyset(&sa.sa_mask);
-    // 손님이 먼저 끊은 연결에 쓰면 SIGPIPE가 프로세스 전체를 죽이므로 무시하고 EPIPE로 받는다 (Q4 지도 Q3)
+    // 클라이언트가 먼저 끊은 연결에 쓰면 SIGPIPE가 프로세스 전체를 죽이므로 무시하고 EPIPE로 받는다 (Q4 지도 Q3)
     sa.sa_handler = SIG_IGN;
     if (sigaction(SIGPIPE, &sa, NULL) < 0)
         return -1;

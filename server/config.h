@@ -43,17 +43,17 @@ struct server_config {
     int queue;                          /* 작업 큐 칸 수 (넘치면 503) */
     int backlog;                        /* 커널이 대신 받아 두는 연결 수 */
     int balance;                        /* enum balance_policy */
-    int eject_fails;                    /* 이어서 이만큼 실패하면 뺌. 0 = 안 뺌 */
+    int eject_fails;                    /* 연속으로 이만큼 실패하면 뺌. 0 = 안 뺌 */
     int eject_ms;                       /* 빼 두는 시간 */
     int slow_start_ms;                  /* 돌아온 서버를 이 시간에 걸쳐 천천히 늘림. 0 = 끔 */
     int retry_safe;                     /* 1이면 GET · HEAD는 실패 뒤 다른 서버에 한 번 더 */
     char gate_path[CONFIG_ROOT_MAX];    /* 줄을 세울 경로. 끝이 /면 그 아래 전부. 빈 문자열이면 끔 */
     int gate_slots;                     /* 동시에 들이는 수. 라우트에 slots가 있으면 그쪽이 이김 */
     int gate_grace_ms;                  /* 오라고 한 시각보다 이만큼 늦으면 떠난 것으로 봄 */
-    int gate_chairs;                    /* 연결을 쥔 채 자리를 기다리는 수 */
-    int gate_overbook;                  /* 부르는 속도 (%). 100 = 처리하는 만큼 */
-    int gate_keep;                      /* 1이면 한 과목이 끝나도 순번 유지, 0이면 줄 끝부터 */
-    int gate_course_slots;              /* 한 과목이 쓰는 자리. 0 = 제한 없음 */
+    int gate_chairs;                    /* 연결을 쥔 채 처리 슬롯을 기다리는 수 */
+    int gate_overbook;                  /* 입장 허용 속도 (%). 100 = 처리하는 만큼 */
+    int gate_keep;                      /* 1이면 한 과목이 끝나도 순번 유지, 0이면 토큰 재발급 */
+    int gate_course_slots;              /* 한 과목이 쓰는 처리 슬롯 수. 0 = 제한 없음 */
     int gate_soldout_ms;                /* 마감 답을 기억하는 시간. 0 = 기억 안 함 */
     struct route routes[CONFIG_MAX_ROUTES];
     int route_count;

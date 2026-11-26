@@ -7,7 +7,7 @@
 
 static atomic_uint turns[CONFIG_MAX_ROUTES];
 static atomic_int inflight[CONFIG_MAX_ROUTES][CONFIG_MAX_BACKENDS];  /* 보내 놓고 안 끝난 수 */
-static atomic_int fails[CONFIG_MAX_ROUTES][CONFIG_MAX_BACKENDS];     /* 이어서 실패한 횟수 */
+static atomic_int fails[CONFIG_MAX_ROUTES][CONFIG_MAX_BACKENDS];     /* 연속으로 실패한 횟수 */
 static atomic_long down_until[CONFIG_MAX_ROUTES][CONFIG_MAX_BACKENDS]; /* 이 시각까지 뺀다 */
 static atomic_long warm_from[CONFIG_MAX_ROUTES][CONFIG_MAX_BACKENDS];  /* 돌아온 시각. 0 = 평소 */
 
@@ -36,7 +36,7 @@ static int warm_enough(const struct server_config *c, int route, int b, unsigned
     return (long)(turn % 100) < (percent < 5 ? 5 : percent);
 }
 
-// 백엔드의 자리(slots)가 꽉 찼으면 1
+// 백엔드의 처리 슬롯(slots)이 꽉 찼으면 1
 // 이유: 한 대가 견딜 만큼만 보내야 안에서 줄이 생기지 않는다. 남는 줄은 프록시가 세운다
 static int is_full(const struct server_config *c, int route, int b)
 {
@@ -44,7 +44,7 @@ static int is_full(const struct server_config *c, int route, int b)
     return slots > 0 && atomic_load(&inflight[route][b]) >= slots;
 }
 
-// 시도하지 않은 백엔드 중 조건에 맞는 것을 cand에 담고 개수를 반환한다. 자리가 꽉 차서 뺀 수는 *full에
+// 시도하지 않은 백엔드 중 조건에 맞는 것을 cand에 담고 개수를 반환한다. 처리 슬롯이 꽉 차서 뺀 수는 *full에
 // 이유: 아픈 서버 · 막 돌아온 서버를 빼고도 하나도 안 남으면 조건을 풀어 다시 모아야 한다
 static int collect(const struct server_config *c, int route, int n, unsigned tried, unsigned turn,
                    long now, int level, int *cand, int *full)
@@ -121,8 +121,8 @@ int balance_pick(const struct server_config *c, int route, int n, unsigned tried
     return c->balance == BALANCE_LEAST ? least_busy(route, cand, m, turn) : cand[turn % (unsigned)m];
 }
 
-// 백엔드에 요청을 보내기 시작했음을 센다. 0, 자리가 이미 꽉 찼으면 되돌리고 -1
-// 이유: 고르는 사이에 다른 워커가 마지막 자리를 가져갈 수 있어, 먼저 세고 넘쳤으면 되돌린다
+// 백엔드에 요청을 보내기 시작했음을 센다. 0, 처리 슬롯이 이미 꽉 찼으면 되돌리고 -1
+// 이유: 고르는 사이에 다른 워커가 마지막 처리 슬롯을 가져갈 수 있어, 먼저 세고 넘쳤으면 되돌린다
 int balance_begin(const struct server_config *c, int route, int b)
 {
     int slots = c->routes[route].slots;
@@ -144,7 +144,7 @@ int balance_capacity(const struct server_config *c, int route, long now)
     return (up > 0 ? up : r->backend_count) * r->slots;
 }
 
-// 요청이 끝났음을 센다. 이어서 eject_fails번 실패하면 eject_ms 동안 빼고, 성공하면 실패를 잊는다
+// 요청이 끝났음을 센다. 연속으로 eject_fails번 실패하면 eject_ms 동안 빼고, 성공하면 실패를 잊는다
 // 이유: 아픈 서버에 요청마다 다시 부딪히지 않게 한다. 실패 뒤 첫 성공은 "돌아온 시각"이 된다
 void balance_end(const struct server_config *c, int route, int b, int failed, long now)
 {

@@ -74,7 +74,7 @@ struct conn *conn_new(int fd, const char *ip, const struct server_config *cfg)
 }
 
 // 다음 요청의 첫 바이트를 기다린다. 오면 1, 시간이 지났거나 줄이 생겼으면 0
-// 이유: 쉬는 연결이 워커를 5초씩 쥐고 있으면 큐에서 기다리는 손님이 그만큼 늦어진다
+// 이유: 쉬는 연결이 워커를 5초씩 쥐고 있으면 큐에서 기다리는 클라이언트가 그만큼 늦어진다
 static int conn_wait_next(const struct conn *c)
 {
     for (int left = c->cfg->client_timeout_ms; left > 0; left -= IDLE_SLICE_MS) {
@@ -87,7 +87,7 @@ static int conn_wait_next(const struct conn *c)
 }
 
 // 요청 하나가 완성될 때까지 읽고 파싱한다. DONE / ERROR / CLOSED / IDLE(기다리다 끝) / TIMEOUT
-// 이유: read 한 번 5초(소켓 타임아웃)와 요청 전체 10초(마감)를 함께 걸어 느린 손님이 워커를 붙잡지 못하게 한다
+// 이유: read 한 번 5초(소켓 타임아웃)와 요청 전체 10초(마감)를 함께 걸어 느린 클라이언트가 워커를 붙잡지 못하게 한다
 static int conn_read_request(struct conn *c)
 {
     struct timespec start;
@@ -153,7 +153,7 @@ static int conn_dispatch(struct conn *c)
 {
     const struct http_message *m = &c->parser.msg;
     const struct route *r = router_match(c->cfg, m->target);
-    // 종료 중이거나 큐에 기다리는 손님이 있으면 이번 응답을 마지막으로 닫는다 (Q6 지도 Q2)
+    // 종료 중이거나 큐에 기다리는 클라이언트가 있으면 이번 응답을 마지막으로 닫는다 (Q6 지도 Q2)
     c->keep = m->keep_alive && c->requests + 1 < MAX_REQUESTS && !atomic_load(&conn_stopping)
               && atomic_load(&conn_waiting) == 0;
     if (r == NULL) {
@@ -172,7 +172,7 @@ static int conn_dispatch(struct conn *c)
 }
 
 // 핸들러 결과와 keep-alive 결정으로 연결을 계속 쓸지 정한다. 계속이면 1
-// 이유: 핸들러가 실패했거나(쓰기 오류 등) 손님 · 요청 수 상한이 닫기를 원하면 끝낸다
+// 이유: 핸들러가 실패했거나(쓰기 오류 등) 클라이언트 · 요청 수 상한이 닫기를 원하면 끝낸다
 static int conn_should_continue(const struct conn *c, int handler_rc)
 {
     return handler_rc == 0 && c->keep;
@@ -203,7 +203,7 @@ void conn_serve(struct conn *c)
 }
 
 // 쓰기만 닫아 FIN을 보내고, 남은 입력을 최대 1초 · 64KB 읽어 버린다
-// 이유: 읽지 않은 바이트가 남은 채 close하면 RST가 나가 손님이 마지막 응답을 버린다 (Q2)
+// 이유: 읽지 않은 바이트가 남은 채 close하면 RST가 나가 클라이언트가 마지막 응답을 버린다 (Q2)
 static void lingering_close(int fd)
 {
     char sink[4096];

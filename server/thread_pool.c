@@ -26,7 +26,7 @@ struct thread_pool {
 };
 
 // 큐에서 작업을 꺼내 work를 실행하는 것을 반복한다. 종료 중이고 큐가 비면 끝낸다. 항상 NULL
-// 이유: 워커는 손님 수와 상관없이 고정된 수만 만들고, 각자 큐에서 다음 일을 스스로 가져간다
+// 이유: 워커는 클라이언트 수와 상관없이 고정된 수만 만들고, 각자 큐에서 다음 일을 스스로 가져간다
 static void *worker_main(void *arg)
 {
     struct thread_pool *p = arg;
@@ -97,7 +97,7 @@ struct thread_pool *pool_create(int nthreads, int queue_cap, pool_work_fn work, 
 }
 
 // 작업 큐에 연결을 넣고 워커 하나를 깨운다. 성공 0, 큐가 가득 차거나 종료 중이면 -1 (호출한 쪽이 503)
-// 이유: accept 스레드는 기다리지 않고 바로 다음 손님을 받아야 하므로, 자리가 없으면 즉시 거절한다
+// 이유: accept 스레드는 기다리지 않고 바로 다음 클라이언트를 받아야 하므로, 자리가 없으면 즉시 거절한다
 int pool_submit(struct thread_pool *p, int fd, const char *ip)
 {
     pthread_mutex_lock(&p->lock);
@@ -116,7 +116,7 @@ int pool_submit(struct thread_pool *p, int fd, const char *ip)
 }
 
 // 새 작업을 막고, 남은 작업을 다 처리한 뒤 워커를 모두 회수하고 해제한다
-// 이유: 큐에 남은 손님을 버리지 않고 끝까지 응답한 뒤 끝내기 위해서다 (스텝 8 안전 종료)
+// 이유: 큐에 남은 클라이언트를 버리지 않고 끝까지 응답한 뒤 끝내기 위해서다 (스텝 8 안전 종료)
 void pool_shutdown(struct thread_pool *p)
 {
     pool_destroy(p, p->nthreads);

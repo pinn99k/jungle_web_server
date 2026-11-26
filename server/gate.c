@@ -1,5 +1,5 @@
-// 줄 서기: 번호판(밖에서 기다림)과 의자(안에서 기다림). 자리가 비자마자 순번이 빠른 사람을 들인다 (스텝 18)
-// 번호표는 순번과 비밀 값일 뿐이라 누구인지 모른다. 누구인지 판단하는 것은 백엔드의 일이다
+// 줄 서기: 입장 허용 순번(밖에서 기다림)과 내부 대기 슬롯(안에서 기다림). 처리 슬롯이 비자마자 순번이 빠른 요청을 들인다 (스텝 18)
+// 대기 토큰은 순번과 비밀 값일 뿐이라 누구인지 모른다. 누구인지 판단하는 것은 백엔드의 일이다
 #include "server/gate.h"
 
 #include <errno.h>
@@ -21,11 +21,11 @@
 #define MIN_WAIT_MS 200
 #define MAX_WAIT_MS 10000
 #define FIRST_SERVICE_MS 100            /* 아직 재지 못했을 때의 한 건 시간 */
-#define CHAIR_SLOTS (GATE_CHAIRS_MAX * 2) /* 부름 받고 아직 일어나는 중인 의자까지 */
+#define CHAIR_SLOTS (GATE_CHAIRS_MAX * 2) /* 처리 슬롯을 받고 아직 깨어나는 중인 것까지 */
 
 enum state { NONE, OUTSIDE, SEATED, RUNNING };
 
-// 번호표 한 장
+// 대기 토큰 한 개
 struct entry {
     enum state state;
     unsigned order;
@@ -33,7 +33,7 @@ struct entry {
     long due;                           /* 다시 오라고 한 시각 */
 };
 
-// 의자 하나. 앉은 워커는 cond에서 잔다
+// 내부 대기 슬롯 하나. 대기 중인 워커는 cond에서 잔다
 struct chair {
     int used;
     int granted;
@@ -45,7 +45,7 @@ struct chair {
 // 줄 전체의 상태. 여러 값을 함께 바꾸므로 lock 하나로 지킨다
 static struct {
     unsigned issued;                    /* 지금까지 발급한 순번 */
-    double board;                       /* 번호판: 이 순번까지 불렀다 */
+    double board;                       /* 입장 허용 순번: 이 순번까지 입장을 허용했다 */
     long moved_at;
     double service_ms;                  /* 한 건에 걸린 시간의 이동 평균 */
     int running;
@@ -59,7 +59,7 @@ static struct chair chairs[CHAIR_SLOTS];
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_once_t once = PTHREAD_ONCE_INIT;
 
-// 의자의 조건 변수를 거꾸로 가지 않는 시계로 만든다
+// 내부 대기 슬롯의 조건 변수를 거꾸로 가지 않는 시계로 만든다
 // 이유: 시스템 시계가 바뀌어도 "최대 2초"가 어긋나지 않아야 한다
 static void init_chairs(void)
 {
@@ -91,7 +91,7 @@ static int make_secret(char out[SECRET_LEN + 1])
     return got == sizeof raw ? 0 : -1;
 }
 
-// 번호표로 칸을 찾는다. 없거나 비밀 값이 다르거나 너무 늦게 왔으면 NULL
+// 대기 토큰으로 칸을 찾는다. 없거나 비밀 값이 다르거나 너무 늦게 왔으면 NULL
 // 이유: "떠났으면 다음 사람 것". 오라고 한 시각에서 grace_ms가 지나면 순번을 잃는다 (핑구 규칙)
 static struct entry *find(const char *ticket, const struct gate_rule *rule, long now)
 {
@@ -111,8 +111,8 @@ static struct entry *find(const char *ticket, const struct gate_rule *rule, long
     return e;
 }
 
-// 다음 순번의 번호표를 발급한다. 그 칸의 옛 번호표가 아직 안에 있으면 NULL
-// 이유: 발급한 순간의 순서가 앞뒤를 정한다. 칸을 다시 쓸 때는 65,536장 전의 번호표만 지워진다
+// 다음 순번의 대기 토큰을 발급한다. 그 칸의 옛 대기 토큰이 아직 안에 있으면 NULL
+// 이유: 발급한 순간의 순서가 앞뒤를 정한다. 칸을 다시 쓸 때는 65,536개 전의 대기 토큰만 지워진다
 static struct entry *issue(const char *secret, long now)
 {
     struct entry *e = &tickets[(g.issued + 1) % TICKETS];
@@ -126,14 +126,14 @@ static struct entry *issue(const char *secret, long now)
 }
 
 // 1밀리초에 부를 순번 수를 반환한다
-// 이유: 자리 ÷ 한 건 시간이 처리량이고, 안 오는 사람만큼 더 빨리 부른다(overbook)
+// 이유: 처리 슬롯 ÷ 한 건 시간이 처리량이고, 오지 않는 요청만큼 더 빨리 허용한다(overbook)
 static double call_rate(const struct gate_rule *rule)
 {
     return rule->slots * (rule->overbook / 100.0) / g.service_ms;
 }
 
-// 흐른 시간만큼 번호판을 올린다. 의자가 꽉 찼으면 멈추고, 빈 곳보다 앞서 부르지 않는다
-// 이유: 너무 많이 부르면 연결이 넘치고, 덜 부르면 자리가 논다
+// 흐른 시간만큼 입장 허용 순번을 올린다. 내부 대기 슬롯이 꽉 찼으면 멈추고, 빈 곳보다 앞서 허용하지 않는다
+// 이유: 너무 많이 허용하면 연결이 넘치고, 덜 허용하면 처리 슬롯이 논다
 static void move_board(const struct gate_rule *rule, long now)
 {
     int room = rule->slots + rule->chairs - g.running - g.seated;
@@ -146,15 +146,15 @@ static void move_board(const struct gate_rule *rule, long now)
         g.moved_at = now;
 }
 
-// 이 과목이 지금 자리를 하나 더 써도 되면 1
-// 이유: 같은 과목은 백엔드에서 한 명씩 처리되므로, 한 과목이 자리를 다 붙잡으면 다른 과목이 막힌다
+// 이 과목이 지금 처리 슬롯을 하나 더 써도 되면 1
+// 이유: 같은 과목은 백엔드에서 한 명씩 처리되므로, 한 과목이 처리 슬롯을 다 붙잡으면 다른 과목이 막힌다
 static int course_ok(const struct gate_rule *rule, int course)
 {
     return rule->course_slots == 0 || course < 0 || g.course_running[course] < rule->course_slots;
 }
 
-// 앉을 수 있으면 1. 과목별 자리를 켰으면 한 과목이 의자의 절반까지만 쓴다
-// 이유: 자리만 나누고 의자를 안 나누면 한 과목이 의자를 다 채워 똑같이 막힌다
+// 내부 대기 슬롯에 들어갈 수 있으면 1. 과목별 처리 슬롯을 켰으면 한 과목이 내부 대기 슬롯의 절반까지만 쓴다
+// 이유: 처리 슬롯만 나누고 내부 대기 슬롯을 안 나누면 한 과목이 내부 대기 슬롯을 다 채워 똑같이 막힌다
 static int chair_ok(const struct gate_rule *rule, int course)
 {
     if (g.seated >= rule->chairs)
@@ -162,8 +162,8 @@ static int chair_ok(const struct gate_rule *rule, int course)
     return rule->course_slots == 0 || course < 0 || g.course_seated[course] < rule->chairs / 2 + 1;
 }
 
-// 빈 자리가 있는 동안 앉은 사람 중 순번이 가장 빠른 사람을 들인다
-// 이유: 자리가 비는 순간 바로 채워야 자리가 놀지 않는다. 순번대로라 다시 눌러도 유리하지 않다
+// 빈 처리 슬롯이 있는 동안 내부 대기 중인 요청 중 순번이 가장 빠른 것을 들인다
+// 이유: 처리 슬롯이 비는 순간 바로 채워야 처리 슬롯이 놀지 않는다. 순번대로라 다시 눌러도 유리하지 않다
 static void dispatch(const struct gate_rule *rule)
 {
     while (g.running < rule->slots) {
@@ -187,8 +187,8 @@ static void dispatch(const struct gate_rule *rule)
     }
 }
 
-// 의자에 앉아 자리를 기다린다(락을 쥔 채 부름). 들어갔으면 1, 2초가 지났으면 0
-// 이유: 부른 사람은 연결을 쥐고 기다려야 자리가 빈 순간 바로 들어간다
+// 내부 대기 슬롯에 들어가 처리 슬롯을 기다린다(락을 쥔 채 호출). 들어갔으면 1, 2초가 지났으면 0
+// 이유: 입장 허용된 요청은 연결을 쥐고 기다려야 처리 슬롯이 빈 순간 바로 들어간다
 static int sit(struct entry *e, int course, const struct gate_rule *rule)
 {
     struct chair *c = chairs;
@@ -232,12 +232,12 @@ static void tell_wait(struct entry *e, const struct gate_rule *rule, long now, s
     e->due = now + out->wait_ms;
 }
 
-// 번호표를 확인하거나 발급하고, 부른 순번이면 들인다. 락을 쥔 채 부른다
+// 대기 토큰을 확인하거나 발급하고, 입장 허용된 순번이면 들인다. 락을 쥔 채 호출한다
 // 이유: gate_enter에서 잠그고 푸는 일을 떼어 내, 나가는 길마다 풀기를 빠뜨리지 않게 한다
 static enum gate_result enter_locked(const char *ticket, const char *secret, int course,
                                      const struct gate_rule *rule, long now, struct gate_pass *out)
 {
-    if (g.service_ms <= 0) {            /* 처음: 빈 곳만큼은 이미 부른 것으로 시작 */
+    if (g.service_ms <= 0) {            /* 처음: 빈 곳만큼은 이미 입장 허용한 것으로 시작 */
         g.service_ms = FIRST_SERVICE_MS;
         g.board = rule->slots + rule->chairs;
     }
@@ -258,17 +258,17 @@ static enum gate_result enter_locked(const char *ticket, const char *secret, int
     if (e->order <= g.board) {
         if (chair_ok(rule, course) && sit(e, course, rule))
             return GATE_PASS;
-        // 이어서는 번호표 1장이 여러 건이라 너무 많이 부르게 된다. 부른 사람이 앉지 못하면 번호판을 잠깐 멈춘다
+        // 토큰 유지에서는 대기 토큰 1개가 여러 건이라 과다 허용된다. 허용된 요청이 내부 대기 슬롯에 못 들어가면 입장 허용 순번을 잠깐 멈춘다
         if (rule->keep && g.moved_at < now + MIN_WAIT_MS)
             g.moved_at = now + MIN_WAIT_MS;
     }
-    // 의자에서 2초를 보냈을 수 있으므로 시각은 늦은 쪽으로 다시 맞춘다
+    // 내부 대기 슬롯에서 2초를 보냈을 수 있으므로 시각은 늦은 쪽으로 다시 맞춘다
     tell_wait(e, rule, now > g.moved_at ? now : g.moved_at, out);
     return GATE_WAIT;
 }
 
-// 번호표(NULL이나 모르는 것이면 새로 발급)로 들어간다. PASS · WAIT · BUSY · FULL
-// 이유: 밖에서 기다리는 사람은 연결도 워커도 쓰지 않고, 부른 사람만 의자에서 연결을 쥐고 기다린다
+// 대기 토큰(NULL이나 모르는 것이면 새로 발급)로 들어간다. PASS · WAIT · BUSY · FULL
+// 이유: 밖에서 기다리는 요청은 연결도 워커도 쓰지 않고, 입장 허용된 요청만 내부 대기 슬롯에서 연결을 쥐고 기다린다
 enum gate_result gate_enter(const char *ticket, int course, const struct gate_rule *rule, long now,
                             struct gate_pass *out)
 {
@@ -285,8 +285,8 @@ enum gate_result gate_enter(const char *ticket, int course, const struct gate_ru
     return r;
 }
 
-// 들어갔던 일이 끝났음을 알린다. 자리를 돌려주고 평균 시간 · 마감 기억을 고친 뒤 다음 사람을 들인다
-// 이유: 서버 잘못으로 답을 못 받은 사람은 순번을 지켜 주고, 끝난 사람은 규칙(줄 끝부터 · 이어서)을 따른다
+// 들어갔던 일이 끝났음을 알린다. 처리 슬롯을 돌려주고 평균 시간 · 마감 기억을 고친 뒤 다음 사람을 들인다
+// 이유: 서버 잘못으로 답을 못 받은 사람은 순번을 지켜 주고, 끝난 사람은 규칙(토큰 재발급 · 토큰 유지)을 따른다
 void gate_leave(const struct gate_pass *p, const struct gate_rule *rule, int status, int took_ms,
                 long now)
 {

@@ -23,7 +23,7 @@ static const char *const HOP_BY_HOP[] = {
 };
 
 // 다음 홉에 넘기면 안 되는 헤더(+ 우리가 다시 쓰는 X-Forwarded-For)면 1
-// 이유: Connection 같은 헤더는 손님과 우리 사이 연결에만 해당해서, 백엔드 · 손님 쪽 연결에 그대로 넘기면 안 된다
+// 이유: Connection 같은 헤더는 클라이언트와 우리 사이 연결에만 해당해서, 백엔드 · 클라이언트 쪽 연결에 그대로 넘기면 안 된다
 static int is_hop_by_hop(const char *name)
 {
     for (size_t i = 0; i < sizeof HOP_BY_HOP / sizeof HOP_BY_HOP[0]; i++) {
@@ -87,7 +87,7 @@ static int add_line(struct buf *out, const char *fmt, const char *a, const char 
 
 // 백엔드에 보낼 요청을 만든다: 요청 줄(경로 그대로, Q1) + 헤더(Host 그대로 Q2, hop-by-hop 제외)
 // + X-Forwarded-For + Connection: close + 본문. 성공 0, 실패 -1
-// 이유: 백엔드는 진짜 손님 IP를 모르므로 XFF로 알려 주고, 응답 끝을 알기 쉽게 요청마다 새 연결로 끝낸다
+// 이유: 백엔드는 진짜 클라이언트 IP를 모르므로 XFF로 알려 주고, 응답 끝을 알기 쉽게 요청마다 새 연결로 끝낸다
 static int build_upstream_request(const struct request_ctx *ctx, struct buf *out)
 {
     const struct http_message *m = ctx->msg;
@@ -98,7 +98,7 @@ static int build_upstream_request(const struct request_ctx *ctx, struct buf *out
         if (!is_hop_by_hop(h->name) && add_line(out, "%s: %s\r\n", h->name, h->value) < 0)
             return -1;
     }
-    // 손님이 이미 XFF를 보냈으면 그 뒤에 손님 IP를 붙인다 (Q6)
+    // 클라이언트가 이미 XFF를 보냈으면 그 뒤에 클라이언트 IP를 붙인다 (Q6)
     const char *xff = http_header_get(m, "X-Forwarded-For");
     int rc = xff ? add_line(out, "X-Forwarded-For: %s, %s\r\n", xff, ctx->ip)
                  : add_line(out, "X-Forwarded-For: %s%s\r\n", ctx->ip, "");
@@ -107,7 +107,7 @@ static int build_upstream_request(const struct request_ctx *ctx, struct buf *out
     return buf_append(out, ctx->raw + m->header_len, m->total_len - m->header_len);
 }
 
-// 오류 응답을 손님에게 보내고 접근 로그 칸을 채운다. 보냈으면 0, 실패 -1
+// 오류 응답을 클라이언트에게 보내고 접근 로그 칸을 채운다. 보냈으면 0, 실패 -1
 // 이유: 502 · 504를 정적 핸들러 오류와 같은 모양으로 보낸다
 static int send_error(struct request_ctx *ctx, int status)
 {
@@ -122,7 +122,7 @@ static int send_error(struct request_ctx *ctx, int status)
 }
 
 // 짧은 JSON 응답을 보내고 접근 로그 칸을 채운다. extra는 추가 헤더 줄. 보냈으면 0, 실패 -1
-// 이유: 줄 서기 · 자리 없음 응답이 같은 모양으로 나가게 한다
+// 이유: 줄 서기 · 처리 슬롯 없음 응답이 같은 모양으로 나가게 한다
 static int send_json(struct request_ctx *ctx, int status, const char *extra, const char *body)
 {
     struct buf out;
@@ -137,8 +137,8 @@ static int send_json(struct request_ctx *ctx, int status, const char *extra, con
     return rc;
 }
 
-// 백엔드 응답 헤더를 손님 쪽 헤더로 다시 써서 out에 만든다 (hop-by-hop은 빼고 Connection은 우리 기준). 성공 0
-// 이유: 백엔드가 보낸 "Connection: close"는 백엔드 연결 이야기라, 손님 연결의 keep-alive와는 따로 정해야 한다 (Q7)
+// 백엔드 응답 헤더를 클라이언트 쪽 헤더로 다시 써서 out에 만든다 (hop-by-hop은 빼고 Connection은 우리 기준). 성공 0
+// 이유: 백엔드가 보낸 "Connection: close"는 백엔드 연결 이야기라, 클라이언트 연결의 keep-alive와는 따로 정해야 한다 (Q7)
 static int build_client_header(const struct http_message *resp, int keep, const char *extra,
                                struct buf *out)
 {
@@ -157,7 +157,7 @@ static int build_client_header(const struct http_message *resp, int keep, const 
 }
 
 // 백엔드 응답 헤더가 다 올 때까지 읽는다. 헤더 완성 0, 첫 바이트 전 시간 초과 504, 그 외 실패 502
-// 이유: 응답 줄 · 헤더를 해석해야 손님 쪽 헤더와 본문 길이(keep-alive 가능 여부)를 정할 수 있다
+// 이유: 응답 줄 · 헤더를 해석해야 클라이언트 쪽 헤더와 본문 길이(keep-alive 가능 여부)를 정할 수 있다
 static int read_response_head(int bfd, struct http_parser *p, struct buf *in)
 {
     char chunk[UPSTREAM_CHUNK];
@@ -185,8 +185,8 @@ static long body_length(const struct http_message *req, const struct http_messag
     return resp->content_length;
 }
 
-// done바이트를 보낸 뒤 손님에게 더 보내도 되는 바이트 수를 max 이하로 반환한다 (길이를 모르면 max)
-// 이유: 백엔드가 약속한 길이보다 많이 보내도 넘기지 않아야 손님 쪽 다음 응답의 경계가 어긋나지 않는다
+// done바이트를 보낸 뒤 클라이언트에게 더 보내도 되는 바이트 수를 max 이하로 반환한다 (길이를 모르면 max)
+// 이유: 백엔드가 약속한 길이보다 많이 보내도 넘기지 않아야 클라이언트 쪽 다음 응답의 경계가 어긋나지 않는다
 static size_t body_room(long cl, size_t done, size_t max)
 {
     if (cl < 0)
@@ -195,8 +195,8 @@ static size_t body_room(long cl, size_t done, size_t max)
     return left < max ? left : max;
 }
 
-// 백엔드 응답을 읽어 손님에게 그대로 흘려보낸다. 0 = 손님 연결 계속 가능, -1 = 닫아야 함,
-// 양수 = 손님에게 아무것도 보내기 전에 실패함 (502 · 504, 부른 쪽이 다시 보내거나 오류로 답함)
+// 백엔드 응답을 읽어 클라이언트에게 그대로 흘려보낸다. 0 = 클라이언트 연결 계속 가능, -1 = 닫아야 함,
+// 양수 = 클라이언트에게 아무것도 보내기 전에 실패함 (502 · 504, 호출한 쪽이 다시 보내거나 오류로 답함)
 // 이유: 응답을 통째로 모으지 않고 받는 대로 보내, 큰 응답도 연결마다 16KB만 쓰게 한다
 static int relay_response(int bfd, struct request_ctx *ctx)
 {
@@ -213,7 +213,7 @@ static int relay_response(int bfd, struct request_ctx *ctx)
         return rc;
     }
     long cl = body_length(ctx->msg, &p.msg);
-    int keep = ctx->keep_alive && cl >= 0; /* 길이를 모르면 손님 연결도 닫아야 끝을 알린다 (Q8) */
+    int keep = ctx->keep_alive && cl >= 0; /* 길이를 모르면 클라이언트 연결도 닫아야 끝을 알린다 (Q8) */
     size_t body = body_room(cl, 0, in.len - p.msg.header_len);
     int ok = build_client_header(&p.msg, keep, ctx->extra, &head) == 0
              && net_write_all(ctx->fd, head.data, head.len) == 0
@@ -268,8 +268,8 @@ static int safe_to_retry(const struct request_ctx *ctx, int sent)
     return ctx->cfg->retry_safe && (strcmp(m, "GET") == 0 || strcmp(m, "HEAD") == 0);
 }
 
-// 자리가 있는 백엔드를 골라 자리를 잡고 번호를 반환한다. 다 찼으면 -1
-// 이유: 고른 뒤 자리를 잡기 전에 다른 워커가 채울 수 있어, 그때는 다시 고른다
+// 처리 슬롯이 있는 백엔드를 골라 처리 슬롯을 잡고 번호를 반환한다. 다 찼으면 -1
+// 이유: 고른 뒤 처리 슬롯을 잡기 전에 다른 워커가 채울 수 있어, 그때는 다시 고른다
 static int reserve(const struct server_config *c, int route, int n, unsigned tried)
 {
     int b;
@@ -285,7 +285,7 @@ static int forward(struct request_ctx *ctx, const struct buf *req)
 {
     int route = (int)(ctx->route - ctx->cfg->routes);
     int n = ctx->route->backend_count;
-    int status = 503;                   /* 한 번도 못 보냈으면 자리가 다 찬 것 */
+    int status = 503;                   /* 한 번도 못 보냈으면 처리 슬롯이 다 찬 것 */
     unsigned tried = 0;
     for (int t = 0; t < (n > 1 ? 2 : 1); t++) {
         int sent;
@@ -301,7 +301,7 @@ static int forward(struct request_ctx *ctx, const struct buf *req)
         if (!safe_to_retry(ctx, sent))
             break;
     }
-    // 줄을 서서 들어왔다가 실패한 손님은 번호표를 돌려받아야 순번을 지킨다
+    // 줄을 서서 들어왔다가 실패한 클라이언트는 대기 토큰을 돌려받아야 순번을 지킨다
     if (ctx->extra != NULL)
         return send_json(ctx, status, ctx->extra, "{\"failed\":true}\n");
     return tried == 0 ? send_json(ctx, 503, "Retry-After: 1\r\n", "{\"busy\":true}\n")
@@ -309,7 +309,7 @@ static int forward(struct request_ctx *ctx, const struct buf *req)
 }
 
 // Cookie 헤더에서 qticket 값(32자)을 찾아 out에 적는다. 없으면 0, 있으면 1
-// 이유: 웹서버는 번호표만 본다. 누구인지 알려 주는 세션 · 토큰은 백엔드가 본다
+// 이유: 웹서버는 대기 토큰만 본다. 누구인지 알려 주는 세션 · 토큰은 백엔드가 본다
 static int ticket_of(const struct request_ctx *ctx, char out[GATE_TICKET_LEN + 1])
 {
     const char *c = http_header_get(ctx->msg, "Cookie");
@@ -334,7 +334,7 @@ static int gated(const struct request_ctx *ctx)
 }
 
 // 줄 세우는 경로 뒤의 과목 번호를 반환한다. 없으면 -1
-// 이유: 과목별 자리와 마감 기억은 "어느 과목인가"만 있으면 된다. 누구인지는 보지 않는다
+// 이유: 과목별 처리 슬롯과 마감 기억은 "어느 과목인가"만 있으면 된다. 누구인지는 보지 않는다
 static int course_of(const struct request_ctx *ctx)
 {
     const char *p = ctx->msg->target + strlen(ctx->cfg->gate_path);
@@ -355,7 +355,7 @@ static struct gate_rule gate_rule_of(const struct request_ctx *ctx)
     return r;
 }
 
-// 번호표 헤더 줄을 extra에 적는다
+// 대기 토큰 헤더 줄을 extra에 적는다
 // 이유: 들어간 응답과 기다리라는 응답이 같은 쿠키를 쓴다
 static void cookie_line(char *extra, size_t n, const char *ticket)
 {
@@ -363,7 +363,7 @@ static void cookie_line(char *extra, size_t n, const char *ticket)
 }
 
 // 줄에 세운다. 들어가도 되면 1, 이미 답했으면(기다림 · 처리 중 · 마감) 0
-// 이유: 기다리는 손님에게 연결 · 워커를 쓰지 않고 바로 답해, 줄이 길어도 서버가 막히지 않는다
+// 이유: 기다리는 클라이언트에게 연결 · 워커를 쓰지 않고 바로 답해, 줄이 길어도 서버가 막히지 않는다
 static int pass_gate(struct request_ctx *ctx, const struct gate_rule *rule, struct gate_pass *pass)
 {
     char mine[GATE_TICKET_LEN + 1];
@@ -390,8 +390,8 @@ static int pass_gate(struct request_ctx *ctx, const struct gate_rule *rule, stru
     return 0;
 }
 
-// 줄을 통과한 요청을 전달하고 자리를 돌려준다. 0 계속, -1 닫기
-// 이유: 걸린 시간과 답을 줄에 알려야 부르는 속도와 마감 기억이 맞는다
+// 줄을 통과한 요청을 전달하고 처리 슬롯을 돌려준다. 0 계속, -1 닫기
+// 이유: 걸린 시간과 답을 줄에 알려야 입장 허용 속도와 마감 기억이 맞는다
 static int forward_gated(struct request_ctx *ctx, const struct buf *req)
 {
     char extra[160];
@@ -412,7 +412,7 @@ static int forward_gated(struct request_ctx *ctx, const struct buf *req)
 }
 
 // 프록시 핸들러: 줄 서기 → 백엔드 선택 → 전달 → 응답 중계. 0 계속, -1 닫기
-// 이유: 라우터가 /api/처럼 프록시 라우트로 고른 요청을 백엔드와 손님 사이에서 대신 전달한다
+// 이유: 라우터가 /api/처럼 프록시 라우트로 고른 요청을 백엔드와 클라이언트 사이에서 대신 전달한다
 int proxy_handle(struct request_ctx *ctx)
 {
     struct buf req;
